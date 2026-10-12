@@ -120,6 +120,15 @@ jobs:
           "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
 
+          # Linux 4.4 ath9k Kconfig unconditionally selects these optional
+          # integrations for ATH9K_HTC. The driver code is already guarded by
+          # CONFIG_MAC80211_LEDS / ATH9K_COMMON_SPECTRAL, so omit those selects
+          # to match the TV kernel, which has neither LED triggers nor relay.
+          sed -i \
+            -e '/^[[:space:]]*select MAC80211_LEDS/d' \
+            -e '/^[[:space:]]*select RELAY/d' \
+            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
+
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
