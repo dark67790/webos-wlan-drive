@@ -38,22 +38,24 @@ jobs:
           find "$RUNNER_TEMP/gofile-source" -type f -printf '%p (%s bytes)\n'
 
       - name: Unpack source and select kernel tree
-        id: source
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/kernel-unpacked"
+          unpacked="$RUNNER_TEMP/kernel-unpacked"
+          mkdir -p "$unpacked"
           mapfile -t archives < <(find "$RUNNER_TEMP/gofile-source" -type f \
-            \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' \
-               -o -name '*.tar.bz2' -o -name '*.zip' \))
+            \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' \
+               -o -name '*.tar.xz' -o -name '*.tar.bz2' -o -name '*.zip' \))
           if [ "${#archives[@]}" -ne 1 ]; then
             echo "Expected one kernel source archive from the Gofile link; found ${#archives[@]}"
+            find "$RUNNER_TEMP/gofile-source" -type f -printf '%p (%s bytes)\n'
             exit 1
           fi
           archive="${archives[0]}"
           case "$archive" in
-            *.zip) unzip -q "$archive" -d "$RUNNER_TEMP/kernel-unpacked" ;;
-            *) tar -xf "$archive" -C "$RUNNER_TEMP/kernel-unpacked" ;;
+            *.zip) unzip -q "$archive" -d "$unpacked" ;;
+            *) tar -xf "$archive" -C "$unpacked" ;;
           esac
+
           kernel_src=""
           while IFS= read -r makefile; do
             if grep -qE '^VERSION[[:space:]]*=' "$makefile" && \
@@ -62,30 +64,53 @@ jobs:
               kernel_src="$(dirname "$makefile")"
               break
             fi
-          done < <(find "$RUNNER_TEMP/kernel-unpacked" -type f -name Makefile -print)
+          done < <(find "$unpacked" -type f -name Makefile -print)
+
+          # LG's O20N archive ships a prepared output tree with a partial
+          # kernel-source directory instead of a normal full kernel checkout.
           if [ -z "$kernel_src" ]; then
-            echo "No Linux kernel source root found in the uploaded archive."
-            find "$RUNNER_TEMP/kernel-unpacked" -maxdepth 3 -type f | head -100
+            mapfile -t partial_sources < <(find "$unpacked" -type d -name kernel-source -print)
+            if [ "${#partial_sources[@]}" -eq 1 ]; then
+              kernel_src="${partial_sources[0]}"
+            fi
+          fi
+          if [ -z "$kernel_src" ]; then
+            echo "Could not identify a kernel source root in the uploaded archive."
+            find "$unpacked" -maxdepth 5 -type f | head -150
             exit 1
           fi
-          printf 'KERNEL_SRC=%s\n' "$kernel_src" >> "$GITHUB_ENV"
+
+          prepared_build="$(dirname "$kernel_src")"
+          if [ -f "$prepared_build/.config" ] && [ -f "$prepared_build/Makefile" ]; then
+            kernel_build="$prepared_build"
+            echo "Using LG prepared build tree: $kernel_build"
+          else
+            kernel_build="$RUNNER_TEMP/kernel-build"
+            mkdir -p "$kernel_build"
+            cp tv-kernel.config "$kernel_build/.config"
+            echo "Using captured TV config for source tree: $kernel_src"
+          fi
+          printf 'KERNEL_SRC=%s\nKERNEL_BUILD=%s\n' "$kernel_src" "$kernel_build" >> "$GITHUB_ENV"
           echo "Kernel source: $kernel_src"
-          rg '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' "$kernel_src/Makefile" || true
+          if [ -f "$kernel_build/include/config/kernel.release" ]; then
+            cat "$kernel_build/include/config/kernel.release"
+          fi
 
       - name: Configure and compile unmodified TV kernel
         run: |
           set -euo pipefail
-          build_dir="$RUNNER_TEMP/kernel-build"
-          mkdir -p "$build_dir"
-          cp tv-kernel.config "$build_dir/.config"
-          make -C "$KERNEL_SRC" O="$build_dir" ARCH=arm64 \
+          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           set +e
-          make -C "$KERNEL_SRC" O="$build_dir" ARCH=arm64 \
+          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- -j2 Image modules 2>&1 | tee kernel-build.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "Kernel build exit code: $rc"
+          if [ -f "$KERNEL_BUILD/arch/arm64/boot/Image" ]; then
+            mkdir -p "$RUNNER_TEMP/kernel-build-output"
+            cp "$KERNEL_BUILD/arch/arm64/boot/Image" "$RUNNER_TEMP/kernel-build-output/Image"
+          fi
           exit "$rc"
 
       - name: Save build log and outputs
@@ -95,6 +120,6 @@ jobs:
           name: lg-kernel-build-probe
           path: |
             kernel-build.log
-            ${{ runner.temp }}/kernel-build/arch/arm64/boot/Image
+            ${{ runner.temp }}/kernel-build-output/Image
           if-no-files-found: warn
           retention-days: 14
