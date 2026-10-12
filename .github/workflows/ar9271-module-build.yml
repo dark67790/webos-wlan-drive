@@ -101,44 +101,77 @@ jobs:
           # headers and Module.symvers from the O20N build output.
           cp tv-kernel.config "$KERNEL_BUILD/.config"
           scripts="$KERNEL_SRC/scripts/config"
+          # This TV kernel has no LED trigger exports. ath9k_htc selects
+          # MAC80211_LEDS by default, so drop that optional Kconfig select.
+          sed -i '/^[[:space:]]*select MAC80211_LEDS if LEDS_CLASS=y || LEDS_CLASS=MAC80211$/d' \
+            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
           "$scripts" --file "$KERNEL_BUILD/.config" --enable CFG80211
           "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH_CARDS
+          # LG's config has LED triggers and relay debug support disabled.
+          # Keep optional ath/mac80211 debug integrations out of these modules.
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable MAC80211_LEDS
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_DEBUGFS
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_HTC_DEBUGFS
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_COMMON_DEBUG
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_COMMON_SPECTRAL
           "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211
           "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             olddefconfig 2>&1 | tee kernel-build.log
-          grep -E '^CONFIG_(CFG80211|MAC80211|ATH_CARDS|ATH9K_HTC|USB)=' "$KERNEL_BUILD/.config"
+          grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
+          ! grep -q '^CONFIG_MAC80211_LEDS=y$' "$KERNEL_BUILD/.config"
           cp "$KERNEL_BUILD/.config" kernel-config.final
 
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             modules_prepare 2>&1 | tee -a kernel-build.log
-          for dir in net/mac80211 drivers/net/wireless/ath drivers/net/wireless/ath/ath9k; do
-            make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-              CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
-              M="$dir" modules 2>&1 | tee -a kernel-build.log
-          done
+          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+            KCFLAGS="-fno-pic -fno-stack-protector" \
+            M=net/mac80211 modules 2>&1 | tee -a kernel-build.log
+          mac80211_symvers="$KERNEL_BUILD/net/mac80211/Module.symvers"
+          test -s "$mac80211_symvers"
+
+          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+            KCFLAGS="-fno-pic -fno-stack-protector" \
+            M=drivers/net/wireless/ath modules 2>&1 | tee -a kernel-build.log
+          ath_symvers="$KERNEL_BUILD/drivers/net/wireless/ath/Module.symvers"
+          test -s "$ath_symvers"
+
+          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+            KCFLAGS="-fno-pic -fno-stack-protector" \
+            KBUILD_EXTRA_SYMBOLS="$mac80211_symvers $ath_symvers" \
+            M=drivers/net/wireless/ath/ath9k modules 2>&1 | tee -a kernel-build.log
+          if grep -q 'WARNING: .*undefined!' kernel-build.log; then
+            echo "Module modpost reported unresolved symbols"
+            grep 'WARNING: .*undefined!' kernel-build.log
+            exit 1
+          fi
 
           mkdir -p "$RUNNER_TEMP/ar9271-output/ath9k_htc"
           find "$KERNEL_BUILD" -type f \
             \( -name mac80211.ko -o -name ath.ko -o -name ath9k_hw.ko \
                -o -name ath9k_common.ko -o -name ath9k_htc.ko \) \
             -exec cp '{}' "$RUNNER_TEMP/ar9271-output/" \;
-          find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -print -exec modinfo -F vermagic '{}' \;
+          find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -print -exec sh -c 'echo vermagic:; modinfo -F vermagic "$1"; echo depends:; modinfo -F depends "$1"' sh '{}' \;
           test "$(find "$RUNNER_TEMP/ar9271-output" -name ath9k_htc.ko | wc -l)" -eq 1
 
       - name: Fetch AR9271 firmware on runner
         run: |
           set -euo pipefail
           curl -fL --retry 3 \
-            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath9k_htc/htc_9271.fw \
-            -o "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271.fw"
+            https://raw.githubusercontent.com/thesofproject/linux-firmware/master/ath9k_htc/htc_9271-1.4.0.fw \
+            -o "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271-1.4.0.fw"
+          cp "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271-1.4.0.fw" \
+            "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271.fw"
           file "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271.fw"
 
       - name: Save AR9271 build artifacts
