@@ -106,6 +106,10 @@ jobs:
           # option tristate for this external-module build.
           sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
             "$KERNEL_SRC/init/Kconfig"
+          # Make the relay initializer module-loadable; the stock kernel has
+          # this feature disabled, so it cannot rely on built-in early init.
+          sed -i 's/^early_initcall(relay_init);/module_init(relay_init);/' \
+            "$KERNEL_SRC/kernel/relay.c"
           # Keep the HTC debug hooks required by this 4.4 driver revision;
           # relay will be supplied as a separate loadable module.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
