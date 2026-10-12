@@ -107,7 +107,8 @@ jobs:
           sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
             "$KERNEL_SRC/init/Kconfig"
           python3 - <<'PY_KCONFIG'
-          p = "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
+          import os
+          p = os.path.join(os.environ["KERNEL_SRC"], "drivers/net/wireless/ath/ath9k/Kconfig")
           s = open(p).read()
           start = s.index("config ATH9K_HTC_DEBUGFS")
           end = s.find("\nconfig ", start + 1)
