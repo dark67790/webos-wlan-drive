@@ -56,6 +56,22 @@ jobs:
             *) tar -xf "$archive" -C "$unpacked" ;;
           esac
 
+          # The Gofile payload can contain an LG package archive which in turn
+          # contains the kernel tree. Keep extracting nested archives on runner.
+          for pass in $(seq 1 20); do
+            mapfile -t nested_archives < <(find "$unpacked" -type f \
+              \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' \
+                 -o -name '*.tar.xz' -o -name '*.tar.bz2' -o -name '*.zip' \))
+            [ "${#nested_archives[@]}" -gt 0 ] || break
+            for nested in "${nested_archives[@]}"; do
+              case "$nested" in
+                *.zip) unzip -q "$nested" -d "$(dirname "$nested")" ;;
+                *) tar -xf "$nested" -C "$(dirname "$nested")" ;;
+              esac
+              mv "$nested" "$nested.extracted"
+            done
+          done
+
           kernel_src=""
           while IFS= read -r makefile; do
             if grep -qE '^VERSION[[:space:]]*=' "$makefile" && \
