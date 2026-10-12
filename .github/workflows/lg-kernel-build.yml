@@ -180,10 +180,19 @@ jobs:
         run: |
           set -euo pipefail
           cd "$DRIVER_DIR"
+          # LG built this driver with GCC 8.2. GCC 9 adds new warnings (for example
+          # address-of-packed-member) and the driver's flags turn warnings into
+          # errors, so drop -Werror from the driver's own build files on the runner.
+          echo "== -Werror in the driver's build files =="
+          grep -rnE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' . || true
+          grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' . \
+            | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g' || true
           touch "$RUNNER_TEMP/build-start"
           set +e
-          make -f "$DRIVER_MAKEFILE" ARCH=arm64 \
+          # -k keeps going so one run lists every file that fails
+          make -k -f "$DRIVER_MAKEFILE" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9 \
+            KCFLAGS=-Wno-error=address-of-packed-member \
             2>&1 | tee "$GITHUB_WORKSPACE/driver-build.log"
           rc=${PIPESTATUS[0]}
           set -e
