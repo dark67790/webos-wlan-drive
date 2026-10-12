@@ -106,6 +106,21 @@ jobs:
           # option tristate for this external-module build.
           sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
             "$KERNEL_SRC/init/Kconfig"
+          python3 - <<'PY_KCONFIG'
+          p = "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
+          s = open(p).read()
+          start = s.index("config ATH9K_HTC_DEBUGFS")
+          end = s.find("\nconfig ", start + 1)
+          if end < 0:
+              end = len(s)
+          block = s[start:end]
+          if "select ATH9K_COMMON_DEBUG" not in block:
+              anchor = "depends on ATH9K_HTC && DEBUG_FS"
+              assert anchor in block
+              block = block.replace(anchor, anchor + "\n\tselect ATH9K_COMMON_DEBUG", 1)
+              s = s[:start] + block + s[end:]
+              open(p, "w").write(s)
+          PY_KCONFIG
           # Preserve the TV's debugfs support and build relay as a module so
           # ath9k's common spectral helper can resolve its relay API.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
