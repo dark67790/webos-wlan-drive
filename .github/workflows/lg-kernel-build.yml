@@ -1,4 +1,4 @@
-name: LG TV kernel build probe
+name: LG TV module build probe
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           # of the runner's default GCC 11.
           sudo apt-get install -y \
             bc bison flex make libelf-dev libssl-dev perl python3 tar xz-utils unzip \
-            gcc-9 gcc-9-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+            gcc-9 gcc-9-aarch64-linux-gnu kmod file
           aarch64-linux-gnu-gcc-9 --version | head -1
 
       - name: Download kernel source from Gofile
@@ -120,50 +120,97 @@ jobs:
         run: |
           echo "== build dir =="; ls -la "$KERNEL_BUILD" | head -40
           echo "== source dir =="; ls "$KERNEL_SRC"; du -sh "$KERNEL_SRC"
-          echo "== arch =="; ls "$KERNEL_SRC/arch" || true
           for f in include/config/kernel.release include/generated/utsrelease.h; do
             if [ -f "$KERNEL_BUILD/$f" ]; then echo "== $f =="; cat "$KERNEL_BUILD/$f"; fi
           done
-          grep -n 'CROSS_COMPILE' "$KERNEL_BUILD/.config" || true
+          echo "== host tools (they must run on this x86_64 runner) =="
+          file "$KERNEL_BUILD/scripts/mod/modpost" "$KERNEL_BUILD/scripts/basic/fixdep" || true
+          ls -la "$KERNEL_BUILD/Module.symvers" "$KERNEL_BUILD/include/config/auto.conf" \
+            "$KERNEL_BUILD/include/generated/autoconf.h" || true
+          echo "== how this kernel builds the module version string =="
+          grep -n -B2 -A8 'define VERMAGIC_STRING' "$KERNEL_SRC/include/linux/vermagic.h" || true
 
-      - name: Point the vendor ARM32 cross prefix at the runner's compiler
-        run: |
-          # The TV config has an absolute path into LG's build server for
-          # CONFIG_CROSS_COMPILE_ARM32; swap in a compiler that exists here.
-          if grep -q '^CONFIG_CROSS_COMPILE_ARM32=' "$KERNEL_BUILD/.config"; then
-            sed -i 's|^CONFIG_CROSS_COMPILE_ARM32=.*|CONFIG_CROSS_COMPILE_ARM32="arm-linux-gnueabihf-"|' \
-              "$KERNEL_BUILD/.config"
-          fi
-
-      - name: Configure and compile unmodified TV kernel
+      - name: Build a hello-world module against the prepared tree
         run: |
           set -euo pipefail
-          KMAKE=(make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9)
-          "${KMAKE[@]}" olddefconfig
+          hello="$RUNNER_TEMP/hello"
+          mkdir -p "$hello"
+          cat > "$hello/hello.c" <<'SRC'
+          #include <linux/module.h>
+          #include <linux/init.h>
+          static int __init probe_init(void) { pr_info("webos module probe loaded\n"); return 0; }
+          static void __exit probe_exit(void) { pr_info("webos module probe unloaded\n"); }
+          module_init(probe_init);
+          module_exit(probe_exit);
+          MODULE_LICENSE("GPL");
+          SRC
+          echo 'obj-m := hello.o' > "$hello/Makefile"
           set +e
-          # -k keeps going after errors so one run lists everything that is missing
-          "${KMAKE[@]}" -k -j"$(nproc)" Image modules 2>&1 | tee kernel-build.log
+          make -C "$KERNEL_BUILD" M="$hello" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9 \
+            modules 2>&1 | tee module-build.log
           rc=${PIPESTATUS[0]}
           set -e
-          echo "Kernel build exit code: $rc"
-          grep -nE 'error:|Error [0-9]|No rule to make target|fatal error' kernel-build.log \
-            | head -80 > first-errors.txt || true
-          cat first-errors.txt
-          if [ -f "$KERNEL_BUILD/arch/arm64/boot/Image" ]; then
-            mkdir -p "$RUNNER_TEMP/kernel-build-output"
-            cp "$KERNEL_BUILD/arch/arm64/boot/Image" "$RUNNER_TEMP/kernel-build-output/Image"
+          echo "Hello module build exit code: $rc"
+          grep -nE 'error:|Error [0-9]|No rule to make target|fatal error' module-build.log \
+            | head -80 > hello-errors.txt || true
+          cat hello-errors.txt
+          if [ "$rc" -eq 0 ]; then
+            file "$hello/hello.ko"
+            modinfo "$hello/hello.ko" || true
           fi
           exit "$rc"
 
-      - name: Save build log and outputs
+      - name: Locate the vendor Wi-Fi driver
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/kernel-unpacked"
+          drv_makefile="$(find "$root" -type f -name 'Makefile_WEBOS60_O20N_64BitMachine' | head -1)"
+          if [ -z "$drv_makefile" ]; then
+            echo "Vendor makefile not found; directories in the package:"
+            find "$root" -maxdepth 4 -type d | head -60
+            exit 1
+          fi
+          printf 'DRIVER_DIR=%s\nDRIVER_MAKEFILE=%s\n' \
+            "$(dirname "$drv_makefile")" "$(basename "$drv_makefile")" >> "$GITHUB_ENV"
+          echo "== $drv_makefile =="
+          cat "$drv_makefile"
+
+      - name: Build the vendor Wi-Fi driver (gen4m MT7921)
+        run: |
+          set -euo pipefail
+          cd "$DRIVER_DIR"
+          touch "$RUNNER_TEMP/build-start"
+          set +e
+          make -f "$DRIVER_MAKEFILE" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9 \
+            2>&1 | tee "$GITHUB_WORKSPACE/driver-build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "Driver build exit code: $rc"
+          grep -nE 'error:|Error [0-9]|No rule to make target|fatal error' \
+            "$GITHUB_WORKSPACE/driver-build.log" | head -80 > "$GITHUB_WORKSPACE/driver-errors.txt" || true
+          cat "$GITHUB_WORKSPACE/driver-errors.txt"
+          mkdir -p "$RUNNER_TEMP/module-output"
+          find "$RUNNER_TEMP/kernel-unpacked" -name '*.ko' -newer "$RUNNER_TEMP/build-start" \
+            -exec cp -v {} "$RUNNER_TEMP/module-output/" \;
+          for ko in "$RUNNER_TEMP"/module-output/*.ko; do
+            [ -e "$ko" ] || continue
+            echo "$ko vermagic: $(modinfo -F vermagic "$ko")"
+          done
+          echo "TV modules report: 4.4.84 SMP preempt mod_unload aarch64"
+          exit "$rc"
+
+      - name: Save build logs and modules
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lg-kernel-build-probe
+          name: lg-module-build-probe
           path: |
-            kernel-build.log
-            first-errors.txt
-            ${{ runner.temp }}/kernel-build-output/Image
+            module-build.log
+            hello-errors.txt
+            driver-build.log
+            driver-errors.txt
+            ${{ runner.temp }}/module-output/*.ko
           if-no-files-found: warn
           retention-days: 14
