@@ -153,6 +153,13 @@ jobs:
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             modules_prepare 2>&1 | tee -a kernel-build.log
+          # The LG output also has stale generated config headers. Ensure the
+          # ath9k HTC translation units see spectral support as disabled, in
+          # sync with the .config and the omitted common-spectral object.
+          sed -i '/^#define CONFIG_ATH9K_COMMON_SPECTRAL[[:space:]]/d' \
+            "$KERNEL_BUILD/include/generated/autoconf.h"
+          sed -i '/^CONFIG_ATH9K_COMMON_SPECTRAL=/d' \
+            "$KERNEL_BUILD/include/config/auto.conf"
           # The LG prepared output contains stale wireless objects built with
           # its original config. Remove only these generated output dirs so
           # Kbuild recompiles the wireless stack against this config/source.
