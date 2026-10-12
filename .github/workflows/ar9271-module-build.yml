@@ -101,6 +101,11 @@ jobs:
           # headers and Module.symvers from the O20N build output.
           cp tv-kernel.config "$KERNEL_BUILD/.config"
           scripts="$KERNEL_SRC/scripts/config"
+          # Linux 4.4 declares RELAY as bool, but we need a loadable relay
+          # provider because the TV kernel has it disabled. Make that Kconfig
+          # option tristate for this external-module build.
+          sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
+            "$KERNEL_SRC/init/Kconfig"
           # Preserve the TV's debugfs support and build relay as a module so
           # ath9k's common spectral helper can resolve its relay API.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
