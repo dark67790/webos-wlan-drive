@@ -107,34 +107,37 @@ jobs:
           sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
             "$KERNEL_SRC/init/Kconfig"
           python3 - <<'PY_KCONFIG'
-          import os
-          p = os.path.join(os.environ["KERNEL_SRC"], "drivers/net/wireless/ath/ath9k/Kconfig")
+          import os, re
+          root = os.environ["KERNEL_SRC"]
+          p = os.path.join(root, "drivers/net/wireless/ath/ath9k/Kconfig")
           s = open(p).read()
-          start = s.index("config ATH9K_HTC_DEBUGFS")
-          end = s.find("\nconfig ", start + 1)
-          if end < 0:
-              end = len(s)
-          block = s[start:end]
+          match = re.search(r"(?m)^config ATH9K_HTC_DEBUGFS\s*$", s)
+          assert match, "ATH9K_HTC_DEBUGFS Kconfig entry was not found"
+          end_match = re.search(r"(?m)^config \w+", s[match.end():])
+          end = match.end() + end_match.start() if end_match else len(s)
+          block = s[match.start():end]
           if "select ATH9K_COMMON_DEBUG" not in block:
               anchor = "depends on ATH9K_HTC && DEBUG_FS"
               assert anchor in block
               block = block.replace(anchor, anchor + "\n\tselect ATH9K_COMMON_DEBUG", 1)
-              s = s[:start] + block + s[end:]
+              s = s[:match.start()] + block + s[end:]
               open(p, "w").write(s)
-          root = os.environ["KERNEL_SRC"]
+
+          entry = re.compile(r"(?m)^config ATH9K_COMMON_DEBUG\s*$")
           for base, _, files in os.walk(root):
               if "Kconfig" not in files:
                   continue
               p = os.path.join(base, "Kconfig")
               s = open(p).read()
-              if "config ATH9K_COMMON_DEBUG" not in s:
+              match = entry.search(s)
+              if not match:
                   continue
-              start = s.index("config ATH9K_COMMON_DEBUG")
-              end = s.find("\nconfig ", start + 1)
-              block = s[start:end if end >= 0 else len(s)]
+              end_match = re.search(r"(?m)^config \w+", s[match.end():])
+              end = match.end() + end_match.start() if end_match else len(s)
+              block = s[match.start():end]
               if "default y if ATH9K_HTC_DEBUGFS" not in block:
                   block = block.rstrip() + "\n\tdefault y if ATH9K_HTC_DEBUGFS\n"
-                  s = s[:start] + block + (s[end:] if end >= 0 else "")
+                  s = s[:match.start()] + block + s[end:]
                   open(p, "w").write(s)
               break
           else:
