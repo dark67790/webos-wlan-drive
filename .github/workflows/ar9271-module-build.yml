@@ -145,6 +145,11 @@ jobs:
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             modules_prepare 2>&1 | tee -a kernel-build.log
+          # The LG prepared output contains stale wireless objects built with
+          # its original config. Remove only these generated output dirs so
+          # Kbuild recompiles the wireless stack against this config/source.
+          rm -rf "$KERNEL_BUILD/drivers/net/wireless/ath" \
+                 "$KERNEL_BUILD/net/mac80211"
           # Build enabled modules in one Kbuild pass so modpost sees the full
           # mac80211/ath symbol set and writes correct inter-module dependencies.
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
