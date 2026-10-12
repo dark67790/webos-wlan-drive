@@ -22,9 +22,13 @@ jobs:
       - name: Install AArch64 kernel build tools
         run: |
           sudo apt-get update
+          # Linux 4.4.84 predates GCC 10 and the TV kernel itself was built with
+          # GCC 8.2, so use GCC 9 for both the cross and host compilers instead
+          # of the runner's default GCC 11.
           sudo apt-get install -y \
-            bc bison flex gcc-aarch64-linux-gnu make \
-            libelf-dev libssl-dev perl python3 tar xz-utils unzip
+            bc bison flex make libelf-dev libssl-dev perl python3 tar xz-utils unzip \
+            gcc-9 gcc-9-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          aarch64-linux-gnu-gcc-9 --version | head -1
 
       - name: Download kernel source from Gofile
         env:
@@ -112,17 +116,40 @@ jobs:
             cat "$kernel_build/include/config/kernel.release"
           fi
 
+      - name: Inspect prepared tree
+        run: |
+          echo "== build dir =="; ls -la "$KERNEL_BUILD" | head -40
+          echo "== source dir =="; ls "$KERNEL_SRC"; du -sh "$KERNEL_SRC"
+          echo "== arch =="; ls "$KERNEL_SRC/arch" || true
+          for f in include/config/kernel.release include/generated/utsrelease.h; do
+            if [ -f "$KERNEL_BUILD/$f" ]; then echo "== $f =="; cat "$KERNEL_BUILD/$f"; fi
+          done
+          grep -n 'CROSS_COMPILE' "$KERNEL_BUILD/.config" || true
+
+      - name: Point the vendor ARM32 cross prefix at the runner's compiler
+        run: |
+          # The TV config has an absolute path into LG's build server for
+          # CONFIG_CROSS_COMPILE_ARM32; swap in a compiler that exists here.
+          if grep -q '^CONFIG_CROSS_COMPILE_ARM32=' "$KERNEL_BUILD/.config"; then
+            sed -i 's|^CONFIG_CROSS_COMPILE_ARM32=.*|CONFIG_CROSS_COMPILE_ARM32="arm-linux-gnueabihf-"|' \
+              "$KERNEL_BUILD/.config"
+          fi
+
       - name: Configure and compile unmodified TV kernel
         run: |
           set -euo pipefail
-          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          KMAKE=(make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-9 HOSTCC=gcc-9)
+          "${KMAKE[@]}" olddefconfig
           set +e
-          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- -j2 Image modules 2>&1 | tee kernel-build.log
+          # -k keeps going after errors so one run lists everything that is missing
+          "${KMAKE[@]}" -k -j"$(nproc)" Image modules 2>&1 | tee kernel-build.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "Kernel build exit code: $rc"
+          grep -nE 'error:|Error [0-9]|No rule to make target|fatal error' kernel-build.log \
+            | head -80 > first-errors.txt || true
+          cat first-errors.txt
           if [ -f "$KERNEL_BUILD/arch/arm64/boot/Image" ]; then
             mkdir -p "$RUNNER_TEMP/kernel-build-output"
             cp "$KERNEL_BUILD/arch/arm64/boot/Image" "$RUNNER_TEMP/kernel-build-output/Image"
@@ -136,6 +163,7 @@ jobs:
           name: lg-kernel-build-probe
           path: |
             kernel-build.log
+            first-errors.txt
             ${{ runner.temp }}/kernel-build-output/Image
           if-no-files-found: warn
           retention-days: 14
