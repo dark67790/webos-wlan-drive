@@ -121,6 +121,15 @@ jobs:
               block = block.replace(anchor, anchor + "\n\tselect ATH9K_COMMON_DEBUG", 1)
               s = s[:start] + block + s[end:]
               open(p, "w").write(s)
+          p = os.path.join(os.environ["KERNEL_SRC"], "drivers/net/wireless/ath/ath9k/Kconfig")
+          s = open(p).read()
+          start = s.index("config ATH9K_COMMON_DEBUG")
+          end = s.find("\nconfig ", start + 1)
+          block = s[start:end]
+          if "default y if ATH9K_HTC_DEBUGFS" not in block:
+              block = block.rstrip() + "\n\tdefault y if ATH9K_HTC_DEBUGFS\n"
+              s = s[:start] + block + s[end:]
+              open(p, "w").write(s)
           PY_KCONFIG
           # Preserve the TV's debugfs support and build relay as a module so
           # ath9k's common spectral helper can resolve its relay API.
