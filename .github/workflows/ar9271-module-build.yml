@@ -128,6 +128,9 @@ jobs:
             -e '/^[[:space:]]*select MAC80211_LEDS/d' \
             -e '/^[[:space:]]*select RELAY/d' \
             "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
+          sed -i \
+            -e '/common-spectral\.o/d' \
+            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
@@ -138,6 +141,11 @@ jobs:
           if grep -qE '^CONFIG_(MAC80211_LEDS|RELAY)=y$' "$KERNEL_BUILD/.config"; then
             echo "Kconfig enabled LED or relay symbols absent from the TV kernel"
             grep -E '^CONFIG_(MAC80211_LEDS|RELAY)=' "$KERNEL_BUILD/.config"
+            exit 1
+          fi
+          if grep -qE '^CONFIG_(ATH9K_COMMON_SPECTRAL|ATH9K_DEBUGFS|ATH9K_HTC_DEBUGFS|ATH9K_COMMON_DEBUG)=[ym]$' "$KERNEL_BUILD/.config"; then
+            echo "Optional ath9k debug/spectral features must remain disabled"
+            grep -E '^CONFIG_(ATH9K_COMMON_SPECTRAL|ATH9K_DEBUGFS|ATH9K_HTC_DEBUGFS|ATH9K_COMMON_DEBUG)=' "$KERNEL_BUILD/.config"
             exit 1
           fi
           cp "$KERNEL_BUILD/.config" kernel-config.final
