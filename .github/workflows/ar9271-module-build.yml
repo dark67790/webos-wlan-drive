@@ -110,18 +110,18 @@ jobs:
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
             olddefconfig 2>&1 | tee kernel-build.log
           grep -E '^CONFIG_(CFG80211|MAC80211|ATH_CARDS|ATH9K_HTC|USB)=' "$KERNEL_BUILD/.config"
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
           cp "$KERNEL_BUILD/.config" kernel-config.final
 
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
             modules_prepare 2>&1 | tee -a kernel-build.log
           for dir in net/mac80211 drivers/net/wireless/ath drivers/net/wireless/ath/ath9k; do
             make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-              CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
+              CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" KCFLAGS=-fno-pic \
               M="$dir" modules 2>&1 | tee -a kernel-build.log
           done
 
