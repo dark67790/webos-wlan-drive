@@ -1,0 +1,117 @@
+## Loaded module metadata
+--- active wlan module (loaded as wlan_mt7668_usb; modinfo name unavailable)
+Installed module file: /lib/modules/4.4.84-229.kcl4tv.6/kernel/wlan_mt7668.ko
+license: Dual BSD/GPL
+description: NIC_DESC
+alias: Mediatek USB IDs including 0E8D:7668
+vermagic: 4.4.84 SMP preempt mod_unload aarch64
+sha256: d3a39d3a3caa11fe8c0ca3b885890b2bf96b95728c158c9704fde4662fc048ff
+--- btmtk_usb
+filename:       /lib/modules/4.4.84-229.kcl4tv.6/kernel/btmtk_usb.ko
+license:        GPL
+version:        6.0.21112901
+description:    Mediatek Bluetooth USB driver ver 6.0.21112901
+srcversion:     07F7DC7196E88E18FF3546A
+alias:          usb:v043Ep310Fd*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep310Cd*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v0E8Dp7663d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep3110d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep310Ed*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep310Bd*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep3109d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v0E8Dp7668d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v043Ep3106d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v0E8Dp76A0d*dc*dsc*dp*icE0isc01ip01in*
+alias:          usb:v0E8Dp7662d*dc*dsc*dp*icE0isc01ip01in*
+depends:
+vermagic:       4.4.84 SMP preempt mod_unload aarch64
+--- webos_tv
+filename:       /lib/modules/4.4.84-229.kcl4tv.6/kernel/webos_tv.ko
+license:        GPL
+description:    tuner/demod loader for the WFM
+depends:
+vermagic:       4.4.84 SMP preempt mod_unload aarch64
+parm:           adapter_nr:DVB adapter numbers (array of short)
+parm:           module_path:charp
+parm:           init_module_addr:ullong
+
+## Kernel module files
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/8812bu.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/btmt7921_usb.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/btmtk_usb.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/demod_khal.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dm-eswap-adaptor.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dm-eswap.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/drivers/lg_kdriver/chip/o20/cpc/galcore.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/drivers/lg_kdriver/core/demod/khal/demod_khal.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/drivers/lg_kdriver/core/hdmi20/hdmi21_hdcp23/linux_hld_module.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/drivers/lg_kdriver/core/pmt/pmt.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/drivers/lg_kdriver/core/venc_hxenc/venc_hxenc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/wlan_mt7663.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/wlan_mt7668.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/wlan_mt7921.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/a8303.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/a8303jp.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/atbm8891.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/atsc_dtv_soc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/atsc_dtv_soc_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/atsc_lgdt3307_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/cxd2857.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dtmb_dtv_soc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dtmb_dtv_soc_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_a8303_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_a8303_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_a8303jp_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_atbm8891_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_atbm8891_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_common_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_cxd2857_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_dtv_soc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_dtv_soc_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_lgdt3307_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_lnbr_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_lnbr_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_mxl683_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_rda5815m_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_rda5816_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_rda_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_rt740_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_rt740_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_si2151_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_si2169d_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_si2178b_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_si2178bjp_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/dvb_silab_adapter.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/integ_dtv_soc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/integ_dtv_soc_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/isdb_cxd2857_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/isdb_dtv_soc.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/isdb_dtv_soc_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/isdb_mxl683_chip.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/lgdt3307.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/lnbr.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/mxl683.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/rda5815m.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/rda5816.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/rt740.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/si2151.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/si2169d.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/si2178b.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/si2178b_atv.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/si2178bjp.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/tfat.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/tntfs.ko
+/lib/modules/4.4.84-229.kcl4tv.6/kernel/webos_tv.ko
+
+## Relevant kernel config flags
+CONFIG_ARM64=y
+CONFIG_SMP=y
+CONFIG_MODULES=y
+# CONFIG_MODVERSIONS is not set
+CONFIG_PREEMPT=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+CONFIG_KALLSYMS=y
+CONFIG_DEBUG_INFO=y
+
+No kernel build directory or matching headers were present at /lib/modules/4.4.84-229.kcl4tv.6/build.

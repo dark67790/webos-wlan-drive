@@ -1,0 +1,82 @@
+# LG webOS TV kernel collection
+Collected: Mon Oct 12 17:49:16 UTC 2026
+
+## System
+Linux LGwebOSTV 4.4.84-229.kcl4tv.6 #1 SMP PREEMPT Fri Mar 1 13:00:30 UTC 2024 aarch64 GNU/Linux
+ID="starfish"
+NAME="webOS TV"
+VERSION="6.4.0"
+VERSION_ID="6.4.0"
+PRETTY_NAME="webOS TV 6.4.0"
+
+## Kernel identity
+Linux version 4.4.84-229.kcl4tv.6 (oe-user@oe-host) (gcc version 8.2.0 (GCC) ) #1 SMP PREEMPT Fri Mar 1 13:00:30 UTC 2024
+cmdline: root=/dev/mmcblk0p27 ro rootfstype=squashfs vmalloc=1216M hma=856M@0x047800000;360M@0x0a9800000 lg1k.use_vmap=1 hma.use_vmap=1 use_vmap=1 cma_on rev=1 console=ttyAMA0,115200n81 chip=O20B0 sver=4.05.48 bver=4.05.48 quiet loglevel=0 snapshot resume=/dev/mmcblk0p51 devtmpfs.mount=1 rootwait emmc_size=0x1d2000000 portProtection mmcoops=dump wdtlog=dump@1M modelopt=01020000011 hwopt=212210001106102001 ToolOpt=1048731:19:1319498:65:31843891:322231049 countryGrp=4 debugMode=5 modelName=OLED48C14LB lg1k.o20_avsinfo=0x52005b lg1k.o20_cpu_avs=0x2 lg1k.o20_core_avs=0x2 lg1k.o20_regul=0x3 criu_enabled disp=<NULL> pat=<NULL> dispopts=<NULL> byear=<NULL> usbcore.wisa=1 tvregion=DVB lg1k.adc=0cde0c840cad080008000800:0f080eda0ece080008000800 cmdEnd
+arch: aarch64
+release: 4.4.84-229.kcl4tv.6
+
+## Config availability
+-r--r--r--    1 root     root         21363 Oct 12 18:49 /proc/config.gz
+missing: /boot/config-4.4.84-229.kcl4tv.6
+missing: /boot/config
+missing: /lib/modules/4.4.84-229.kcl4tv.6/build/.config
+
+## Module paths
+total 0
+drwxr-xr-x    1 root     root            42 Mar  1  2024 .
+drwxr-xr-x    1 root     root            46 Mar  1  2024 ..
+drwxr-xr-x    1 root     root            29 Mar  1  2024 4.4.84-229.kcl4tv.6
+total 121
+drwxr-xr-x    1 root     root            29 Mar  1  2024 .
+drwxr-xr-x    1 root     root            42 Mar  1  2024 ..
+drwxr-xr-x    1 root     root          1254 Mar  1  2024 kernel
+-rw-r--r--    1 root     root          3796 Mar  1  2024 modules.alias
+-rw-r--r--    1 root     root          3610 Mar  1  2024 modules.alias.bin
+-rw-r--r--    1 root     root         17741 Mar  1  2024 modules.builtin
+-rw-r--r--    1 root     root         19607 Mar  1  2024 modules.builtin.bin
+-rw-r--r--    1 root     root          4795 Mar  1  2024 modules.dep
+-rw-r--r--    1 root     root          8187 Mar  1  2024 modules.dep.bin
+-rw-r--r--    1 root     root             0 Mar  1  2024 modules.devname
+-rw-r--r--    1 root     root           432 Mar  1  2024 modules.order
+-rw-r--r--    1 root     root            55 Mar  1  2024 modules.softdep
+-rw-r--r--    1 root     root         29057 Mar  1  2024 modules.symbols
+-rw-r--r--    1 root     root         33355 Mar  1  2024 modules.symbols.bin
+build symlink:
+/lib/modules/4.4.84-229.kcl4tv.6/build
+## Available module utilities
+/sbin/modinfo
+/sbin/lsmod
+/sbin/insmod
+/sbin/depmod
+
+## Loaded modules
+tfat 364544 0 - Live 0xffffffbffc785000 (PO)
+tntfs 536576 0 - Live 0xffffffbffc6e0000 (PO)
+wlan_mt7668_usb 2695168 0 - Live 0xffffffbffc3b2000 (O)
+btmtk_usb 147456 2 - Live 0xffffffbffc34c000 (O)
+a8303 16384 0 - Live 0xffffffbffc344000 (O)
+dvb_a8303_chip 16384 1 a8303, Live 0xffffffbffc33d000 (PO)
+dvb_a8303_adapter 16384 1 dvb_a8303_chip, Live 0xffffffbffc336000 (O)
+rda5815m 16384 0 - Live 0xffffffbffc32e000 (O)
+dvb_rda5815m_chip 49152 1 rda5815m, Live 0xffffffbffc31e000 (PO)
+dvb_rda_adapter 16384 1 dvb_rda5815m_chip, Live 0xffffffbffc317000 (O)
+si2178b 16384 0 - Live 0xffffffbffc30f000 (O)
+si2178b_atv 16384 0 - Live 0xffffffbffc306000 (O)
+dvb_si2178b_chip 266240 2 si2178b,si2178b_atv, Live 0xffffffbffc2b8000 (PO)
+dvb_silab_adapter 16384 1 dvb_si2178b_chip, Live 0xffffffbffc27b000 (O)
+dvb_dtv_soc 16384 0 - Live 0xffffffbffc0fc000 (O)
+dvb_dtv_soc_chip 65536 1 dvb_dtv_soc, Live 0xffffffbffc2a5000 (PO)
+dvb_common_adapter 16384 2 dvb_si2178b_chip,dvb_dtv_soc_chip, Live 0xffffffbffc02e000 (O)
+demod_khal 126976 1 dvb_dtv_soc_chip, Live 0xffffffbffc0d6000
+webos_tv 90112 10 a8303,dvb_a8303_chip,rda5815m,dvb_rda5815m_chip,si2178b,si2178b_atv,dvb_si2178b_chip,dvb_dtv_soc,dvb_dtv_soc_chip, Live 0xffffffbffc280000 (O)
+linux_hld_module 1523712 0 - Live 0xffffffbffc103000 (P)
+galcore 651264 2 - Live 0xffffffbffc036000
+venc_hxenc 184320 0 - Live 0xffffffbffc000000 (P)
+
+## Device tree model
+/sys/firmware/devicetree/base/model: LG Electronics, DTV SoC LG1212 (AArch64)
+/sys/firmware/devicetree/base/compatible: lge,lg1212
+lge,lg1k
+
+## Compiler/toolchain hints
+4.4.84-229.kcl4tv.6
