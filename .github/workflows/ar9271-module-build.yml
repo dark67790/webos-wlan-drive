@@ -117,8 +117,7 @@ jobs:
           "$scripts" --file "$KERNEL_BUILD/.config" --enable DEBUG_FS
           "$scripts" --file "$KERNEL_BUILD/.config" --module RELAY
           "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_DEBUGFS
-          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_HTC_DEBUGFS
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH9K_COMMON_DEBUG
+          "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH9K_HTC_DEBUGFS
           "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211
           "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
@@ -138,9 +137,10 @@ jobs:
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
           grep -q '^CONFIG_RELAY=m$' "$KERNEL_BUILD/.config"
           grep -q '^CONFIG_ATH9K_COMMON_DEBUG=y$' "$KERNEL_BUILD/.config"
-          if grep -qE '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS|ATH9K_HTC_DEBUGFS)=y$' "$KERNEL_BUILD/.config"; then
-            echo "Unsupported LED or ath9k debug options are enabled"
-            grep -E '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS|ATH9K_HTC_DEBUGFS)=' "$KERNEL_BUILD/.config"
+          grep -q '^CONFIG_ATH9K_HTC_DEBUGFS=y$' "$KERNEL_BUILD/.config"
+          if grep -qE '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=y$' "$KERNEL_BUILD/.config"; then
+            echo "Unsupported LED or PCI ath9k debug options are enabled"
+            grep -E '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=' "$KERNEL_BUILD/.config"
             exit 1
           fi
           cp "$KERNEL_BUILD/.config" kernel-config.final
