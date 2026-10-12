@@ -121,15 +121,24 @@ jobs:
               block = block.replace(anchor, anchor + "\n\tselect ATH9K_COMMON_DEBUG", 1)
               s = s[:start] + block + s[end:]
               open(p, "w").write(s)
-          p = os.path.join(os.environ["KERNEL_SRC"], "drivers/net/wireless/ath/ath9k/Kconfig")
-          s = open(p).read()
-          start = s.index("config ATH9K_COMMON_DEBUG")
-          end = s.find("\nconfig ", start + 1)
-          block = s[start:end]
-          if "default y if ATH9K_HTC_DEBUGFS" not in block:
-              block = block.rstrip() + "\n\tdefault y if ATH9K_HTC_DEBUGFS\n"
-              s = s[:start] + block + s[end:]
-              open(p, "w").write(s)
+          root = os.environ["KERNEL_SRC"]
+          for base, _, files in os.walk(root):
+              if "Kconfig" not in files:
+                  continue
+              p = os.path.join(base, "Kconfig")
+              s = open(p).read()
+              if "config ATH9K_COMMON_DEBUG" not in s:
+                  continue
+              start = s.index("config ATH9K_COMMON_DEBUG")
+              end = s.find("\nconfig ", start + 1)
+              block = s[start:end if end >= 0 else len(s)]
+              if "default y if ATH9K_HTC_DEBUGFS" not in block:
+                  block = block.rstrip() + "\n\tdefault y if ATH9K_HTC_DEBUGFS\n"
+                  s = s[:start] + block + (s[end:] if end >= 0 else "")
+                  open(p, "w").write(s)
+              break
+          else:
+              raise SystemExit("ATH9K_COMMON_DEBUG Kconfig entry was not found")
           PY_KCONFIG
           # Preserve the TV's debugfs support and build relay as a module so
           # ath9k's common spectral helper can resolve its relay API.
