@@ -130,6 +130,40 @@ jobs:
             echo "Spectral object was not removed from ath9k_common"
             exit 1
           fi
+          python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+
+          ath9k = Path(os.environ["KERNEL_SRC"]) / "drivers/net/wireless/ath/ath9k"
+          replacements = {
+              "htc_drv_main.c": (
+                  "\t/* perform spectral scan if requested. */\n"
+                  "\tif (test_bit(ATH_OP_SCANNING, &common->op_flags) &&\n"
+                  "\t    priv->spec_priv.spectral_mode == SPECTRAL_CHANSCAN)\n"
+                  "\t\tath9k_cmn_spectral_scan_trigger(common, &priv->spec_priv);",
+                  "\t/* Spectral scanning is omitted in this relay-free build. */",
+              ),
+              "htc_drv_txrx.c": (
+                  "\t\tif (ath_cmn_process_fft(&priv->spec_priv, hdr,\n"
+                  "\t\t\t\t    &rx_stats, rx_status->mactime)) {\n"
+                  "\t\t\t/* TODO: Code to collect spectral scan statistics */\n"
+                  "\t\t}",
+                  "\t\t/* Drop PHY error frames; FFT parsing is omitted. */",
+              ),
+          }
+          for name, (old, new) in replacements.items():
+              path = ath9k / name
+              text = path.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"Expected one spectral call block in {name}")
+              path.write_text(text.replace(old, new, 1))
+          PYCODE
+          if grep -nE 'ath9k_cmn_spectral_scan_trigger|ath_cmn_process_fft' \
+              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_main.c" \
+              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c"; then
+            echo "HTC sources still reference spectral helpers"
+            exit 1
+          fi
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
@@ -181,9 +215,9 @@ jobs:
             echo "A WLAN module unexpectedly depends on relay"
             exit 1
           fi
-          if aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -Eq '[[:space:]]relay_[[:alnum:]_]+'; then
-            echo "A WLAN module imports relay symbols unavailable on the TV"
-            aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -E '[[:space:]]relay_[[:alnum:]_]+'
+          if aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -Eq '[[:space:]](relay_[[:alnum:]_]+|ath9k_cmn_spectral_[[:alnum:]_]+|ath_cmn_process_fft)'; then
+            echo "A WLAN module imports relay or omitted spectral symbols"
+            aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -E '[[:space:]](relay_[[:alnum:]_]+|ath9k_cmn_spectral_[[:alnum:]_]+|ath_cmn_process_fft)'
             exit 1
           fi
 
