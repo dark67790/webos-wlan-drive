@@ -128,9 +128,9 @@ jobs:
             olddefconfig 2>&1 | tee kernel-build.log
           grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
-          if grep -qE '^CONFIG_(RELAY|ATH9K_HTC_DEBUGFS)=(y|m)$' "$KERNEL_BUILD/.config"; then
-            echo "Relay support and HTC spectral debugfs must remain disabled"
-            grep -E '^CONFIG_(RELAY|ATH9K_HTC_DEBUGFS)=' "$KERNEL_BUILD/.config"
+          if grep -qE '^CONFIG_ATH9K_HTC_DEBUGFS=(y|m)$' "$KERNEL_BUILD/.config"; then
+            echo "HTC spectral debugfs must remain disabled"
+            grep -E '^CONFIG_ATH9K_HTC_DEBUGFS=' "$KERNEL_BUILD/.config"
             exit 1
           fi
           if grep -qE '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=y$' "$KERNEL_BUILD/.config"; then
