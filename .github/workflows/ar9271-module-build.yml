@@ -101,8 +101,9 @@ jobs:
           # headers and Module.symvers from the O20N build output.
           cp tv-kernel.config "$KERNEL_BUILD/.config"
           scripts="$KERNEL_SRC/scripts/config"
-          # Build only the USB HTC driver path. Its optional spectral debugfs
-          # support pulls in relay APIs that this TV kernel does not export.
+          # Build only the USB HTC path without the optional spectral code.
+          # This Linux 4.4 tree includes common-spectral.o in ath9k_common,
+          # and that object imports relay APIs the TV does not export.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
           "$scripts" --file "$KERNEL_BUILD/.config" --enable CFG80211
           "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH_CARDS
@@ -117,10 +118,18 @@ jobs:
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
 
           # Avoid ath9k's unconditional LED select; the TV kernel has no LED
-          # trigger exports. Do not enable spectral debugfs or relay support.
+          # trigger exports. Also remove the 4.4 spectral object from the
+          # common module; HTC spectral debugfs is disabled above.
           sed -i \
             -e '/^[[:space:]]*select MAC80211_LEDS/d' \
             "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
+          sed -i '/common-spectral\.o/d' \
+            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"
+          if grep -q 'common-spectral\.o' \
+              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"; then
+            echo "Spectral object was not removed from ath9k_common"
+            exit 1
+          fi
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
@@ -170,6 +179,11 @@ jobs:
           test "$(find "$RUNNER_TEMP/ar9271-output" -name relay.ko | wc -l)" -eq 0
           if find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -exec modinfo -F depends '{}' \; | grep -qw relay; then
             echo "A WLAN module unexpectedly depends on relay"
+            exit 1
+          fi
+          if aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -Eq '[[:space:]]relay_[[:alnum:]_]+'; then
+            echo "A WLAN module imports relay symbols unavailable on the TV"
+            aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -E '[[:space:]]relay_[[:alnum:]_]+'
             exit 1
           fi
 
