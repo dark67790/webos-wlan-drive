@@ -132,31 +132,37 @@ jobs:
           fi
           python3 - <<'PYCODE'
           import os
+          import re
           from pathlib import Path
 
           ath9k = Path(os.environ["KERNEL_SRC"]) / "drivers/net/wireless/ath/ath9k"
           replacements = {
               "htc_drv_main.c": (
-                  "\t/* perform spectral scan if requested. */\n"
-                  "\tif (test_bit(ATH_OP_SCANNING, &common->op_flags) &&\n"
-                  "\t    priv->spec_priv.spectral_mode == SPECTRAL_CHANSCAN)\n"
-                  "\t\tath9k_cmn_spectral_scan_trigger(common, &priv->spec_priv);",
+                  re.compile(
+                      r"\t/\* perform spectral scan if requested\. \*/\n"
+                      r"\tif \(test_bit\(ATH_OP_SCANNING, &common->op_flags\) &&\n"
+                      r"\s+priv->spec_priv\.spectral_mode == SPECTRAL_CHANSCAN\)\n"
+                      r"\t\tath9k_cmn_spectral_scan_trigger\(common, &priv->spec_priv\);"
+                  ),
                   "\t/* Spectral scanning is omitted in this relay-free build. */",
               ),
               "htc_drv_txrx.c": (
-                  "\t\tif (ath_cmn_process_fft(&priv->spec_priv, hdr,\n"
-                  "\t\t\t\t    &rx_stats, rx_status->mactime)) {\n"
-                  "\t\t\t/* TODO: Code to collect spectral scan statistics */\n"
-                  "\t\t}",
+                  re.compile(
+                      r"\t\tif \(ath_cmn_process_fft\(&priv->spec_priv, hdr,\n"
+                      r"\s+&rx_stats, rx_status->mactime\)\) \{\n"
+                      r"\s+/\* TODO: Code to collect spectral scan statistics \*/\n"
+                      r"\t\t\}"
+                  ),
                   "\t\t/* Drop PHY error frames; FFT parsing is omitted. */",
               ),
           }
-          for name, (old, new) in replacements.items():
+          for name, (pattern, replacement) in replacements.items():
               path = ath9k / name
               text = path.read_text()
-              if text.count(old) != 1:
-                  raise SystemExit(f"Expected one spectral call block in {name}")
-              path.write_text(text.replace(old, new, 1))
+              updated, count = pattern.subn(replacement, text)
+              if count != 1:
+                  raise SystemExit(f"Expected one spectral call block in {name}, found {count}")
+              path.write_text(updated)
           PYCODE
           if grep -nE 'ath9k_cmn_spectral_scan_trigger|ath_cmn_process_fft' \
               "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_main.c" \
