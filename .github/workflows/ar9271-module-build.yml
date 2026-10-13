@@ -101,18 +101,8 @@ jobs:
           # headers and Module.symvers from the O20N build output.
           cp tv-kernel.config "$KERNEL_BUILD/.config"
           scripts="$KERNEL_SRC/scripts/config"
-          # Linux 4.4 declares RELAY as bool, but we need a loadable relay
-          # provider because the TV kernel has it disabled. Make that Kconfig
-          # option tristate for this external-module build.
-          sed -i '/^config RELAY$/,/^config / s/^\([[:space:]]*\)bool "Kernel->user space relay support (formerly relayfs)"/\1tristate "Kernel->user space relay support (formerly relayfs)"/' \
-            "$KERNEL_SRC/init/Kconfig"
-          # Make the relay initializer module-loadable; the stock kernel has
-          # this feature disabled, so it cannot rely on built-in early init.
-          sed -i 's/^early_initcall(relay_init);/module_init(relay_init);/' \
-            "$KERNEL_SRC/kernel/relay.c"
-          sed -i '1i#include <linux/module.h>' "$KERNEL_SRC/kernel/relay.c"
-          # Keep the HTC debug hooks required by this 4.4 driver revision;
-          # relay will be supplied as a separate loadable module.
+          # Build only the USB HTC driver path. Its optional spectral debugfs
+          # support pulls in relay APIs that this TV kernel does not export.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
           "$scripts" --file "$KERNEL_BUILD/.config" --enable CFG80211
           "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH_CARDS
@@ -120,23 +110,17 @@ jobs:
           "$scripts" --file "$KERNEL_BUILD/.config" --disable MAC80211_LEDS
           "$scripts" --file "$KERNEL_BUILD/.config" --disable LEDS_CLASS
           "$scripts" --file "$KERNEL_BUILD/.config" --enable DEBUG_FS
-          "$scripts" --file "$KERNEL_BUILD/.config" --module RELAY
           "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_DEBUGFS
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH9K_HTC_DEBUGFS
+          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_HTC_DEBUGFS
           "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211
           "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
 
-          # Avoid ath9k's unconditional selects: LED triggers are absent from
-          # the TV kernel, while relay is supplied by the relay.ko built here.
+          # Avoid ath9k's unconditional LED select; the TV kernel has no LED
+          # trigger exports. Do not enable spectral debugfs or relay support.
           sed -i \
             -e '/^[[:space:]]*select MAC80211_LEDS/d' \
-            -e '/^[[:space:]]*select RELAY/d' \
             "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
-          # The 4.4 HTC source calls the shared spectral helpers even when
-          # relay support is off; include their provider and ship relay.ko.
-          printf '\nath9k_common-y += common-spectral.o\n' \
-            >> "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"
 
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
@@ -144,8 +128,11 @@ jobs:
             olddefconfig 2>&1 | tee kernel-build.log
           grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
-          grep -q '^CONFIG_RELAY=m$' "$KERNEL_BUILD/.config"
-          grep -q '^CONFIG_ATH9K_HTC_DEBUGFS=y$' "$KERNEL_BUILD/.config"
+          if grep -qE '^CONFIG_(RELAY|ATH9K_HTC_DEBUGFS)=(y|m)$' "$KERNEL_BUILD/.config"; then
+            echo "Relay support and HTC spectral debugfs must remain disabled"
+            grep -E '^CONFIG_(RELAY|ATH9K_HTC_DEBUGFS)=' "$KERNEL_BUILD/.config"
+            exit 1
+          fi
           if grep -qE '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=y$' "$KERNEL_BUILD/.config"; then
             echo "Unsupported LED or PCI ath9k debug options are enabled"
             grep -E '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=' "$KERNEL_BUILD/.config"
@@ -175,12 +162,16 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/ar9271-output/ath9k_htc"
           find "$KERNEL_BUILD" -type f \
-            \( -name relay.ko -o -name mac80211.ko -o -name ath.ko -o -name ath9k_hw.ko \
+            \( -name mac80211.ko -o -name ath.ko -o -name ath9k_hw.ko \
                -o -name ath9k_common.ko -o -name ath9k_htc.ko \) \
             -exec cp '{}' "$RUNNER_TEMP/ar9271-output/" \;
           find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -print -exec sh -c 'echo vermagic:; modinfo -F vermagic "$1"; echo depends:; modinfo -F depends "$1"' sh '{}' \;
           test "$(find "$RUNNER_TEMP/ar9271-output" -name ath9k_htc.ko | wc -l)" -eq 1
-          test "$(find "$RUNNER_TEMP/ar9271-output" -name relay.ko | wc -l)" -eq 1
+          test "$(find "$RUNNER_TEMP/ar9271-output" -name relay.ko | wc -l)" -eq 0
+          if find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -exec modinfo -F depends '{}' \; | grep -qw relay; then
+            echo "A WLAN module unexpectedly depends on relay"
+            exit 1
+          fi
 
       - name: Fetch AR9271 firmware on runner
         run: |
