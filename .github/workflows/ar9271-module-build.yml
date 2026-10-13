@@ -28,16 +28,22 @@ jobs:
 
       - name: Install GCC 8.2 AArch64 cross compiler (Arm GNU-A 8.2-2019.01)
         run: |
-          set -euo pipefail
+          # The TV kernel was built with GCC 8.2.0. Try to use the same major
+          # version; if the download fails, keep going with the apt compiler so the
+          # rest of the build still runs (the compiler used is printed below).
           cd "$RUNNER_TEMP"
           f=gcc-arm-8.2-2019.01-x86_64-aarch64-linux-gnu.tar.xz
           base=https://developer.arm.com/-/media/Files/downloads/gnu-a/8.2-2019.01
-          curl -fL --retry 3 -o "$f" "$base/$f" || curl -fL --retry 3 -o "$f" "$base/binrel/$f"
-          sha256sum "$f"
-          tar -xf "$f"
-          bin="$RUNNER_TEMP/${f%.tar.xz}/bin"
-          "$bin/aarch64-linux-gnu-gcc" -dumpversion | tee /dev/stderr | grep -q '^8\.'
-          echo "$bin" >> "$GITHUB_PATH"
+          if curl -fL --retry 3 -o "$f" "$base/$f" || curl -fL --retry 3 -o "$f" "$base/binrel/$f"; then
+            sha256sum "$f"
+            tar -xf "$f"
+            bin="$RUNNER_TEMP/${f%.tar.xz}/bin"
+            echo "$bin" >> "$GITHUB_PATH"
+            "$bin/aarch64-linux-gnu-gcc" --version | head -1
+          else
+            echo "::warning::Could not download Arm GCC 8.2; using the apt compiler instead"
+            aarch64-linux-gnu-gcc --version | head -1
+          fi
 
       - name: Download LG prepared build tree on runner
         env:
@@ -107,14 +113,15 @@ jobs:
           tar -xf linux-4.4.84.tar.xz
           echo "KERNEL_SRC=$RUNNER_TEMP/linux-4.4.84" >> "$GITHUB_ENV"
 
-      - name: Compare LG headers with vanilla 4.4.84
+      - name: Where does LG differ from vanilla? (information only)
         run: |
+          # Earlier run: include/net/{cfg80211,mac80211}.h, linux/{netdevice,skbuff,
+          # usb,device,module}.h were byte-identical to vanilla. This lists every
+          # other file LG changed or added in the areas this driver touches.
           LG="$KERNEL_BUILD/kernel-source"
-          for h in include/net/cfg80211.h include/net/mac80211.h \
-                   include/linux/netdevice.h include/linux/skbuff.h \
-                   include/linux/usb.h include/linux/device.h include/linux/module.h; do
-            echo "=== $h  changed lines: $(diff "$KERNEL_SRC/$h" "$LG/$h" | grep -c '^[<>]')"
-            diff -u "$KERNEL_SRC/$h" "$LG/$h" | head -200 || true
+          for p in include arch/arm64/include net/wireless net/core drivers/usb/core kernel/module.c; do
+            echo "=== $p (files that differ, or exist only in LG)"
+            diff -rq "$KERNEL_SRC/$p" "$LG/$p" 2>&1 | grep -v "^Only in $KERNEL_SRC" | head -60 || true
           done
 
       - name: Enable and build AR9271 modules only
@@ -194,12 +201,48 @@ jobs:
             exit 1
           fi
 
+          # LG's kernel gets CONFIG_PINCTRL and CONFIG_WIRELESS_EXT switched on by
+          # LG-only options that do not exist in vanilla Kconfig, so olddefconfig
+          # silently turned them OFF. Both change struct layouts in the headers:
+          #   PINCTRL       -> struct device gets/loses its 'pins' pointer, and
+          #                    struct device is embedded in wiphy, net_device,
+          #                    usb_device and usb_interface
+          #   WIRELESS_EXT  -> struct net_device gets/loses wireless_handlers and
+          #                    wireless_data, right before netdev_ops
+          # The TV kernel has no CONFIG_MODVERSIONS, so nothing catches the mismatch
+          # at load time. Make vanilla Kconfig keep both on, like the TV.
+          sed -i '/^config PINCTRL$/{n;s/^\tbool$/\tdef_bool y/}' \
+            "$KERNEL_SRC/drivers/pinctrl/Kconfig"
+          sed -i '/^config WIRELESS_EXT$/{n;s/^\tbool$/\tdef_bool y/}' \
+            "$KERNEL_SRC/net/wireless/Kconfig"
+          grep -A1 '^config PINCTRL$' "$KERNEL_SRC/drivers/pinctrl/Kconfig"
+          grep -A1 '^config WIRELESS_EXT$' "$KERNEL_SRC/net/wireless/Kconfig"
+
+          aarch64-linux-gnu-gcc --version | head -1
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             olddefconfig 2>&1 | tee kernel-build.log
           grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
+
+          # Config-drift report: every option whose value differs from the TV.
+          norm() { grep -E '^(CONFIG_|# CONFIG_)' "$1" | sed -E 's/^# (CONFIG_[A-Za-z0-9_]+) is not set$/\1=n/' | sort; }
+          norm tv-kernel.config > "$RUNNER_TEMP/tv.norm"
+          norm "$KERNEL_BUILD/.config" > "$RUNNER_TEMP/new.norm"
+          echo "== options only in the TV config (LG-only or dropped by vanilla Kconfig) =="
+          comm -23 <(cut -d= -f1 "$RUNNER_TEMP/tv.norm" | sort -u) \
+                   <(cut -d= -f1 "$RUNNER_TEMP/new.norm" | sort -u) | tr '\n' ' '; echo
+          echo "== options present in both whose value changed (TV=new) =="
+          join -t= -j1 <(LC_ALL=C sort -t= -k1,1 "$RUNNER_TEMP/tv.norm") \
+                       <(LC_ALL=C sort -t= -k1,1 "$RUNNER_TEMP/new.norm") | awk -F= '$2!=$3'
+          # These three must match the TV or the module ABI is wrong.
+          for sym in PINCTRL WIRELESS_EXT WEXT_CORE; do
+            if ! grep -q "^CONFIG_${sym}=y$" "$KERNEL_BUILD/.config"; then
+              echo "CONFIG_${sym} is not =y; struct layouts would not match the TV"
+              exit 1
+            fi
+          done
           if grep -qE '^CONFIG_ATH9K_HTC_DEBUGFS=(y|m)$' "$KERNEL_BUILD/.config"; then
             echo "HTC spectral debugfs must remain disabled"
             grep -E '^CONFIG_ATH9K_HTC_DEBUGFS=' "$KERNEL_BUILD/.config"
@@ -237,6 +280,15 @@ jobs:
             \( -name mac80211.ko -o -name ath.ko -o -name ath9k_hw.ko \
                -o -name ath9k_common.ko -o -name ath9k_htc.ko \) \
             -exec cp '{}' "$RUNNER_TEMP/ar9271-output/" \;
+          # The TV kernel has no CCM/GCM (CONFIG_CRYPTO_CCM/GCM are not set) but
+          # mac80211 needs them for WPA2-CCMP/GCMP. Collect them in a separate
+          # folder; load them only after the five modules above work.
+          mkdir -p "$RUNNER_TEMP/ar9271-output/crypto-extra"
+          find "$KERNEL_BUILD" -type f \
+            \( -name ccm.ko -o -name ctr.ko -o -name gcm.ko -o -name ghash-generic.ko \
+               -o -name gf128mul.ko -o -name seqiv.ko \) \
+            -exec cp '{}' "$RUNNER_TEMP/ar9271-output/crypto-extra/" \;
+          ls -l "$RUNNER_TEMP/ar9271-output/crypto-extra"
           find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -print -exec sh -c 'echo vermagic:; modinfo -F vermagic "$1"; echo depends:; modinfo -F depends "$1"' sh '{}' \;
           test "$(find "$RUNNER_TEMP/ar9271-output" -name ath9k_htc.ko | wc -l)" -eq 1
           test "$(find "$RUNNER_TEMP/ar9271-output" -name relay.ko | wc -l)" -eq 0
