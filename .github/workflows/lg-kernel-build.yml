@@ -136,7 +136,6 @@ jobs:
           # and that object imports relay APIs the TV does not export.
           "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
           "$scripts" --file "$KERNEL_BUILD/.config" --enable CFG80211
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable WLAN
           "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH_CARDS
           # Keep LED triggers off; the TV has no LED trigger exports.
           "$scripts" --file "$KERNEL_BUILD/.config" --disable MAC80211_LEDS
@@ -145,8 +144,8 @@ jobs:
           "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_DEBUGFS
           "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_HTC_DEBUGFS
           "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211
-          "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211_HWSIM
           "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
+          "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211_HWSIM
           "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
 
           # Avoid ath9k's unconditional LED select; the TV kernel has no LED
@@ -198,7 +197,7 @@ jobs:
           PYCODE
           if grep -nE 'ath9k_cmn_spectral_scan_trigger|ath_cmn_process_fft' \
               "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_main.c" \
-              "$KERNEL_SRC/drivers/net/wireless/ath/htc_drv_txrx.c"; then
+              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c"; then
             echo "HTC sources still reference spectral helpers"
             exit 1
           fi
@@ -217,21 +216,15 @@ jobs:
             "$KERNEL_SRC/drivers/pinctrl/Kconfig"
           sed -i '/^config WIRELESS_EXT$/{n;s/^\tbool$/\tdef_bool y/}' \
             "$KERNEL_SRC/net/wireless/Kconfig"
-          sed -i '/^menuconfig WLAN$/{n;s/^\tbool.*/\tdef_bool y/}' \
-            "$KERNEL_SRC/drivers/net/wireless/Kconfig"
-          sed -i '/^config MAC80211_HWSIM$/{n;s/^\ttristate.*/\tdef_tristate m/}' \
-            "$KERNEL_SRC/drivers/net/wireless/Kconfig"
-
           grep -A1 '^config PINCTRL$' "$KERNEL_SRC/drivers/pinctrl/Kconfig"
           grep -A1 '^config WIRELESS_EXT$' "$KERNEL_SRC/net/wireless/Kconfig"
-          grep -A1 '^config MAC80211_HWSIM$' "$KERNEL_SRC/drivers/net/wireless/Kconfig"
 
           aarch64-linux-gnu-gcc --version | head -1
           hostflags='-O2 -fcommon'
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             olddefconfig 2>&1 | tee kernel-build.log
-          grep -E '^CONFIG_(WLAN|CFG80211|MAC80211|MAC80211_HWSIM|MAC80211_LEDS|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
+          grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|MAC80211_HWSIM|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
           grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
           grep -q '^CONFIG_MAC80211_HWSIM=m$' "$KERNEL_BUILD/.config"
 
@@ -268,17 +261,16 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             modules_prepare 2>&1 | tee -a kernel-build.log
           # The LG prepared output contains stale wireless objects built with
-          # its original config. Remove generated output dirs and any hwsim targets.
+          # its original config. Remove only these generated output dirs so
+          # Kbuild recompiles the wireless stack against this config/source.
           rm -rf "$KERNEL_BUILD/drivers/net/wireless/ath" \
                  "$KERNEL_BUILD/net/mac80211"
-          rm -f "$KERNEL_BUILD/drivers/net/wireless/mac80211_hwsim"*
-
-          # Build enabled modules, explicitly passing mac80211_hwsim.ko so Kbuild
-          # does not skip building the loose module in drivers/net/wireless.
+          # Build enabled modules in one Kbuild pass so modpost sees the full
+          # mac80211/ath symbol set and writes correct inter-module dependencies.
           make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
             KCFLAGS="-fno-pic -fno-stack-protector" \
-            modules drivers/net/wireless/mac80211_hwsim.ko 2>&1 | tee -a kernel-build.log
+            modules 2>&1 | tee -a kernel-build.log
           if grep -q 'WARNING: .*undefined!' kernel-build.log; then
             echo "Module modpost reported unresolved symbols"
             grep 'WARNING: .*undefined!' kernel-build.log
@@ -293,7 +285,7 @@ jobs:
             -exec cp '{}' "$RUNNER_TEMP/ar9271-output/" \;
           # The TV kernel has no CCM/GCM (CONFIG_CRYPTO_CCM/GCM are not set) but
           # mac80211 needs them for WPA2-CCMP/GCMP. Collect them in a separate
-          # folder; load them only after the modules above work.
+          # folder; load them only after the five modules above work.
           mkdir -p "$RUNNER_TEMP/ar9271-output/crypto-extra"
           find "$KERNEL_BUILD" -type f \
             \( -name ccm.ko -o -name ctr.ko -o -name gcm.ko -o -name ghash-generic.ko \
