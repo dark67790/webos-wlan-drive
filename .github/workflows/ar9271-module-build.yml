@@ -94,6 +94,16 @@ jobs:
           tar -xf linux-4.4.84.tar.xz
           echo "KERNEL_SRC=$RUNNER_TEMP/linux-4.4.84" >> "$GITHUB_ENV"
 
+      - name: Compare LG headers with vanilla 4.4.84
+        run: |
+          LG="$KERNEL_BUILD/kernel-source"
+          for h in include/net/cfg80211.h include/net/mac80211.h \
+                   include/linux/netdevice.h include/linux/skbuff.h \
+                   include/linux/usb.h include/linux/device.h include/linux/module.h; do
+            echo "=== $h  changed lines: $(diff "$KERNEL_SRC/$h" "$LG/$h" | grep -c '^[<>]')"
+            diff -u "$KERNEL_SRC/$h" "$LG/$h" | head -200 || true
+          done
+
       - name: Enable and build AR9271 modules only
         run: |
           set -euo pipefail
