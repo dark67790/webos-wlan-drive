@@ -26,6 +26,19 @@ jobs:
             bc bison flex gcc-aarch64-linux-gnu make \
             libelf-dev libssl-dev perl python3 tar xz-utils unzip kmod
 
+      - name: Install GCC 8.2 AArch64 cross compiler (Arm GNU-A 8.2-2019.01)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          f=gcc-arm-8.2-2019.01-x86_64-aarch64-linux-gnu.tar.xz
+          base=https://developer.arm.com/-/media/Files/downloads/gnu-a/8.2-2019.01
+          curl -fL --retry 3 -o "$f" "$base/$f" || curl -fL --retry 3 -o "$f" "$base/binrel/$f"
+          sha256sum "$f"
+          tar -xf "$f"
+          bin="$RUNNER_TEMP/${f%.tar.xz}/bin"
+          "$bin/aarch64-linux-gnu-gcc" -dumpversion | tee /dev/stderr | grep -q '^8\.'
+          echo "$bin" >> "$GITHUB_PATH"
+
       - name: Download LG prepared build tree on runner
         env:
           KERNEL_SHARE_URL: https://gofile.io/d/yjgaN3fb
