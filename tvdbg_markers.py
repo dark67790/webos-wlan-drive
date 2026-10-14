@@ -130,4 +130,29 @@ edit("htc_drv_init.c", [
     ("before", "\tret = ath9k_init_queues(priv);",
      slow("init_priv: ath9k_hw_init ok, before init_queues")),
 ])
+
+edit("hw.c", [
+    ("before", "\tath9k_hw_read_revisions(ah);\n\n\tswitch (ah->hw_version.macVersion) {\n\tcase AR_SREV_VERSION_5416_PCI:",
+     slow("hw: __ath9k_hw_init entered, before read_revisions")),
+    ("before", "\t/*\n\t * Read back AR_WA into a permanent copy",
+     slow("hw: read_revisions ok")),
+    ("before", "\tif (!ath9k_hw_set_reset_reg(ah, ATH9K_RESET_POWER_ON)) {\n\t\tath_err(common, \"Couldn't reset chip",
+     slow("hw: before set_reset_reg POWER_ON")),
+    ("before", "\tath9k_hw_init_defaults(ah);\n\tath9k_hw_init_config(ah);",
+     slow("hw: chip reset ok, before init_defaults")),
+    ("before", "\tr = ath9k_hw_attach_ops(ah);",
+     slow("hw: before attach_ops")),
+    ("before", "\tif (!ath9k_hw_setpower(ah, ATH9K_PM_AWAKE)) {\n\t\tath_err(common, \"Couldn't wakeup chip",
+     slow("hw: before setpower AWAKE")),
+    ("before", "\tah->hw_version.phyRev = REG_READ(ah, AR_PHY_CHIP_ID);",
+     slow("hw: awake ok, before phyRev read")),
+    ("before", "\tr = ath9k_hw_post_init(ah);",
+     slow("hw: before post_init (eeprom)")),
+    ("before", "\tath9k_hw_init_mode_gain_regs(ah);\n\tr = ath9k_hw_fill_cap_info(ah);",
+     slow("hw: post_init ok, before fill_cap_info")),
+    ("before", "\tr = ath9k_hw_init_macaddr(ah);",
+     slow("hw: cap_info ok, before init_macaddr")),
+    ("before", "\tath9k_hw_init_hang_checks(ah);",
+     slow("hw: macaddr ok")),
+])
 print("done")
