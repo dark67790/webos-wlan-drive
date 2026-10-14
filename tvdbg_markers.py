@@ -28,7 +28,7 @@ P = 'printk(KERN_EMERG "TVDBG %s\\n");'
 # counted marker for callbacks that fire many times: only the first N print
 def counted(fmt, args=""):
     a = (", " + args) if args else ""
-    return ('{ static int tvdbg_n; if (tvdbg_n++ < 40) '
+    return ('{ static int tvdbg_n; if (tvdbg_n++ < 400) '
             f'printk(KERN_EMERG "TVDBG {fmt}\\n"{a}); }}')
 
 
@@ -36,8 +36,8 @@ def mark(text):
     return P % text
 
 
-def slow(text):
-    return P % text + f" msleep({SLEEP_MS});"
+def slow(text, ms=None):
+    return P % text + f" msleep({ms or SLEEP_MS});"
 
 
 def edit(name, pairs):
@@ -139,7 +139,7 @@ edit("hw.c", [
     ("before", "\tif (!ath9k_hw_set_reset_reg(ah, ATH9K_RESET_POWER_ON)) {\n\t\tath_err(common, \"Couldn't reset chip",
      slow("hw: before set_reset_reg POWER_ON")),
     ("before", "\tath9k_hw_init_defaults(ah);\n\tath9k_hw_init_config(ah);",
-     slow("hw: chip reset ok, before init_defaults")),
+     slow("hw: chip reset ok, before init_defaults (5 s pause)", 5000)),
     ("before", "\tr = ath9k_hw_attach_ops(ah);",
      slow("hw: before attach_ops")),
     ("before", "\tif (!ath9k_hw_setpower(ah, ATH9K_PM_AWAKE)) {\n\t\tath_err(common, \"Couldn't wakeup chip",
