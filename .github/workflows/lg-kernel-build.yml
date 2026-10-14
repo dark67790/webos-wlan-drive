@@ -169,7 +169,7 @@ jobs:
 
           # Newer GCC treats a few of these as hard errors; the vendor makefile has none,
           # but strip any -Werror that may exist so a warning never blocks the .ko.
-          grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$DRV" \
+          { grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$DRV" || true; } \
             | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
 
       - name: Build 88XXau.ko against LG's prepared tree
