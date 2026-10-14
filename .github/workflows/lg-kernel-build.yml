@@ -1,36 +1,39 @@
-name: AR9271 ath9k_htc module build
+name: RTL8812AU 88XXau module build
 
 on:
   push:
     branches: [main]
     paths:
-      - .github/workflows/ar9271-module-build.yml
-      - tv-kernel.config
+      - .github/workflows/rtl8812au-module-build.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # Pinned tip of aircrack-ng/rtl8812au branch v5.6.4.2 (2026-03-17).
+  DRIVER_REPO: https://github.com/aircrack-ng/rtl8812au.git
+  DRIVER_SHA: 734485506a30d6237c2deaad666a19f8ca5379f2
+  # What the TV reports; only used for a warning if LG's tree says otherwise.
+  TV_RELEASE: 4.4.84-229.kcl4tv.6
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
-      - name: Check out build configuration
-        uses: actions/checkout@v4
-
       - name: Install AArch64 kernel build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison flex gcc-aarch64-linux-gnu make \
-            libelf-dev libssl-dev perl python3 tar xz-utils unzip kmod
+            bc bison flex make git libelf-dev libssl-dev perl python3 tar xz-utils unzip kmod file \
+            gcc-aarch64-linux-gnu gcc-9 gcc-9-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Install GCC 8.2 AArch64 cross compiler (Arm GNU-A 8.2-2019.01)
         run: |
-          # The TV kernel was built with GCC 8.2.0. Try to use the same major
-          # version; if the download fails, keep going with the apt compiler so the
-          # rest of the build still runs (the compiler used is printed below).
+          # The TV kernel was built with GCC 8.2.0. Use the same major version when
+          # the download works; otherwise fall back to apt's gcc-9 (the compiler the
+          # earlier hello and MT7921 probes used). The choice is exported as CC.
           cd "$RUNNER_TEMP"
           f=gcc-arm-8.2-2019.01-x86_64-aarch64-linux-gnu.tar.xz
           base=https://developer.arm.com/-/media/Files/downloads/gnu-a/8.2-2019.01
@@ -39,10 +42,14 @@ jobs:
             tar -xf "$f"
             bin="$RUNNER_TEMP/${f%.tar.xz}/bin"
             echo "$bin" >> "$GITHUB_PATH"
+            echo "CC=$bin/aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+            echo "STRIP=$bin/aarch64-linux-gnu-strip" >> "$GITHUB_ENV"
             "$bin/aarch64-linux-gnu-gcc" --version | head -1
           else
-            echo "::warning::Could not download Arm GCC 8.2; using the apt compiler instead"
-            aarch64-linux-gnu-gcc --version | head -1
+            echo "::warning::Could not download Arm GCC 8.2; using apt gcc-9 instead"
+            echo "CC=aarch64-linux-gnu-gcc-9" >> "$GITHUB_ENV"
+            echo "STRIP=aarch64-linux-gnu-strip" >> "$GITHUB_ENV"
+            aarch64-linux-gnu-gcc-9 --version | head -1
           fi
 
       - name: Download LG prepared build tree on runner
@@ -98,232 +105,146 @@ jobs:
             exit 1
           fi
           printf 'KERNEL_BUILD=%s\n' "${build_trees[0]}" >> "$GITHUB_ENV"
-          echo "LG prepared release: $(cat "${build_trees[0]}/include/config/kernel.release")"
-
-      - name: Restore complete Linux 4.4.84 source on runner
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fL --retry 3 -o linux-4.4.84.tar.xz \
-            https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-4.4.84.tar.xz
-          curl -fL --retry 3 -o sha256sums.asc \
-            https://cdn.kernel.org/pub/linux/kernel/v4.x/sha256sums.asc
-          awk '$2 == "linux-4.4.84.tar.xz" { print $1 "  " $2 }' sha256sums.asc > linux-4.4.84.sha256
-          sha256sum -c linux-4.4.84.sha256
-          tar -xf linux-4.4.84.tar.xz
-          echo "KERNEL_SRC=$RUNNER_TEMP/linux-4.4.84" >> "$GITHUB_ENV"
-
-      - name: Where does LG differ from vanilla? (information only)
-        run: |
-          # Earlier run: include/net/{cfg80211,mac80211}.h, linux/{netdevice,skbuff,
-          # usb,device,module}.h were byte-identical to vanilla. This lists every
-          # other file LG changed or added in the areas this driver touches.
-          LG="$KERNEL_BUILD/kernel-source"
-          for p in include arch/arm64/include net/wireless net/core drivers/usb/core kernel/module.c; do
-            echo "=== $p (files that differ, or exist only in LG)"
-            diff -rq "$KERNEL_SRC/$p" "$LG/$p" 2>&1 | grep -v "^Only in $KERNEL_SRC" | head -60 || true
-          done
-
-      - name: Enable and build AR9271 modules only
-        run: |
-          set -euo pipefail
-          # Start with the TV-captured config; retain LG's prepared generated
-          # headers and Module.symvers from the O20N build output.
-          cp tv-kernel.config "$KERNEL_BUILD/.config"
-          scripts="$KERNEL_SRC/scripts/config"
-          # Build only the USB HTC path without the optional spectral code.
-          # This Linux 4.4 tree includes common-spectral.o in ath9k_common,
-          # and that object imports relay APIs the TV does not export.
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable MODULES
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable CFG80211
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable ATH_CARDS
-          # Keep LED triggers off; the TV has no LED trigger exports.
-          "$scripts" --file "$KERNEL_BUILD/.config" --disable MAC80211_LEDS
-          "$scripts" --file "$KERNEL_BUILD/.config" --disable LEDS_CLASS
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable DEBUG_FS
-          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_DEBUGFS
-          "$scripts" --file "$KERNEL_BUILD/.config" --disable ATH9K_HTC_DEBUGFS
-          "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211
-          "$scripts" --file "$KERNEL_BUILD/.config" --module ATH9K_HTC
-          "$scripts" --file "$KERNEL_BUILD/.config" --module MAC80211_HWSIM
-          "$scripts" --file "$KERNEL_BUILD/.config" --enable USB
-
-          # Avoid ath9k's unconditional LED select; the TV kernel has no LED
-          # trigger exports. Also remove the 4.4 spectral object from the
-          # common module; HTC spectral debugfs is disabled above.
-          sed -i \
-            -e '/^[[:space:]]*select MAC80211_LEDS/d' \
-            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Kconfig"
-          sed -i '/common-spectral\.o/d' \
-            "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"
-          if grep -q 'common-spectral\.o' \
-              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/Makefile"; then
-            echo "Spectral object was not removed from ath9k_common"
-            exit 1
+          rel="$(cat "${build_trees[0]}/include/config/kernel.release")"
+          echo "LG prepared release: $rel"
+          if [ "$rel" != "$TV_RELEASE" ]; then
+            echo "::warning::LG tree says '$rel' but the TV reports '$TV_RELEASE'"
           fi
-          python3 - <<'PYCODE'
-          import os
+
+      - name: Fetch rtl8812au (pinned commit)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/drv-src"
+          cd "$RUNNER_TEMP/drv-src"
+          git init -q .
+          git remote add origin "$DRIVER_REPO"
+          git fetch -q --depth 1 origin "$DRIVER_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='driver commit %H (%cs) %s'
+          echo "DRV=$RUNNER_TEMP/drv-src" >> "$GITHUB_ENV"
+
+      - name: Patch driver for Linux 4.4 (cfg80211_connect_bss does not exist before 4.11)
+        run: |
+          set -euo pipefail
+          python3 -I - "$DRV" <<'PYCODE'
           import re
+          import sys
           from pathlib import Path
 
-          ath9k = Path(os.environ["KERNEL_SRC"]) / "drivers/net/wireless/ath/ath9k"
-          replacements = {
-              "htc_drv_main.c": (
-                  re.compile(
-                      r"\t/\* perform spectral scan if requested\. \*/\n"
-                      r"\tif \(test_bit\(ATH_OP_SCANNING, &common->op_flags\) &&\n"
-                      r"\s+priv->spec_priv\.spectral_mode == SPECTRAL_CHANSCAN\)\n"
-                      r"\t\tath9k_cmn_spectral_scan_trigger\(common, &priv->spec_priv\);"
-                  ),
-                  "\t/* Spectral scanning is omitted in this relay-free build. */",
-              ),
-              "htc_drv_txrx.c": (
-                  re.compile(
-                      r"\t\tif \(ath_cmn_process_fft\(&priv->spec_priv, hdr,\n"
-                      r"\s+&rx_stats, rx_status->mactime\)\) \{\n"
-                      r"\s+/\* TODO: Code to collect spectral scan statistics \*/\n"
-                      r"\t\t\}"
-                  ),
-                  "\t\t/* Drop PHY error frames; FFT parsing is omitted. */",
-              ),
-          }
-          for name, (pattern, replacement) in replacements.items():
-              path = ath9k / name
-              text = path.read_text()
-              updated, count = pattern.subn(replacement, text)
-              if count != 1:
-                  raise SystemExit(f"Expected one spectral call block in {name}, found {count}")
-              path.write_text(updated)
+          path = Path(sys.argv[1]) / "os_dep/linux/ioctl_cfg80211.c"
+          text = path.read_text()
+
+          # The driver switches to the 6-argument cfg80211_connect_bss() at 4.10,
+          # but that function only appeared in 4.11. On 4.4 use
+          # cfg80211_connect_result() and drop the bss reference ourselves.
+          old_cond = ("#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) || "
+                      "defined(CONFIG_CFG80211_CONNECT_BSS_ANDROID))")
+          new_cond = old_cond.replace("(4, 10, 0)", "(4, 11, 0)")
+          if text.count(old_cond) != 1:
+              raise SystemExit(f"connect_bss condition: expected 1 match, found {text.count(old_cond)}")
+          text = text.replace(old_cond, new_cond)
+
+          legacy = re.compile(
+              r"(\t\t#else // \(LINUX_VERSION_CODE >= KERNEL_VERSION\(4, 10, 0\)\)\n"
+              r"\s*// Linux < 4\.10\.x does not accept the last argument \(timeout\)\.\n)"
+              r"(\s*)cfg80211_connect_bss\(wdev_to_ndev\(pwdev\), cur_network->network\.MacAddress, bss\n"
+              r"(.*?)"
+              r", WLAN_STATUS_SUCCESS, GFP_ATOMIC\);\n", re.S)
+
+          def repl(m):
+              ind, body = m.group(2), m.group(3)
+              return (m.group(1)
+                  + ind + "/* Linux < 4.11: no cfg80211_connect_bss(); use cfg80211_connect_result(). */\n"
+                  + ind + "cfg80211_connect_result(wdev_to_ndev(pwdev), cur_network->network.MacAddress\n"
+                  + body + ", WLAN_STATUS_SUCCESS, GFP_ATOMIC);\n"
+                  + ind + "if (bss)\n" + ind + "\tcfg80211_put_bss(pwdev->wiphy, bss);\n")
+
+          text, n = legacy.subn(repl, text)
+          if n != 1:
+              raise SystemExit(f"legacy connect_bss call: expected 1 match, found {n}")
+          path.write_text(text)
+          print("patched ioctl_cfg80211.c")
           PYCODE
-          if grep -nE 'ath9k_cmn_spectral_scan_trigger|ath_cmn_process_fft' \
-              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_main.c" \
-              "$KERNEL_SRC/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c"; then
-            echo "HTC sources still reference spectral helpers"
-            exit 1
-          fi
+          grep -n 'cfg80211_connect_result\|cfg80211_connect_bss' "$DRV/os_dep/linux/ioctl_cfg80211.c"
 
-          # LG's kernel gets CONFIG_PINCTRL and CONFIG_WIRELESS_EXT switched on by
-          # LG-only options that do not exist in vanilla Kconfig, so olddefconfig
-          # silently turned them OFF. Both change struct layouts in the headers:
-          #   PINCTRL       -> struct device gets/loses its 'pins' pointer, and
-          #                    struct device is embedded in wiphy, net_device,
-          #                    usb_device and usb_interface
-          #   WIRELESS_EXT  -> struct net_device gets/loses wireless_handlers and
-          #                    wireless_data, right before netdev_ops
-          # The TV kernel has no CONFIG_MODVERSIONS, so nothing catches the mismatch
-          # at load time. Make vanilla Kconfig keep both on, like the TV.
-          sed -i '/^config PINCTRL$/{n;s/^\tbool$/\tdef_bool y/}' \
-            "$KERNEL_SRC/drivers/pinctrl/Kconfig"
-          sed -i '/^config WIRELESS_EXT$/{n;s/^\tbool$/\tdef_bool y/}' \
-            "$KERNEL_SRC/net/wireless/Kconfig"
-          grep -A1 '^config PINCTRL$' "$KERNEL_SRC/drivers/pinctrl/Kconfig"
-          grep -A1 '^config WIRELESS_EXT$' "$KERNEL_SRC/net/wireless/Kconfig"
+          # Newer GCC treats a few of these as hard errors; the vendor makefile has none,
+          # but strip any -Werror that may exist so a warning never blocks the .ko.
+          grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$DRV" \
+            | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
 
-          aarch64-linux-gnu-gcc --version | head -1
-          hostflags='-O2 -fcommon'
-          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
-            olddefconfig 2>&1 | tee kernel-build.log
-          grep -E '^CONFIG_(CFG80211|MAC80211|MAC80211_LEDS|MAC80211_HWSIM|ATH_CARDS|ATH9K_HTC|ATH9K.*DEBUGFS|ATH9K_COMMON.*|USB|RELAY)=' "$KERNEL_BUILD/.config" || true
-          grep -q '^CONFIG_ATH9K_HTC=m$' "$KERNEL_BUILD/.config"
-          grep -q '^CONFIG_MAC80211_HWSIM=m$' "$KERNEL_BUILD/.config"
+      - name: Build 88XXau.ko against LG's prepared tree
+        run: |
+          set -uo pipefail
+          # No .config change, no olddefconfig: LG's own .config, generated headers
+          # and Module.symvers are used exactly as shipped, so struct layouts match
+          # the TV kernel (an earlier vanilla olddefconfig dropped LG's PINCTRL and
+          # WIRELESS_EXT, which changes struct device / net_device layouts).
+          #
+          # Driver switches:
+          #   CONFIG_88XXAU=m            the driver Makefile only sets this when invoked
+          #                              directly, not through Kbuild
+          #   CONFIG_PLATFORM_I386_PC=n  default platform; wrong endian/cfg80211 flags for ARM
+          #   CONFIG_PLATFORM_ARM64_RPI=y generic little-endian arm64: adds
+          #                              -DCONFIG_LITTLE_ENDIAN -DCONFIG_IOCTL_CFG80211
+          #                              -DRTW_USE_CFG80211_STA_EVENT
+          echo "compiler: $("$CC" --version | head -1)"
+          make -k -j"$(nproc)" -C "$KERNEL_BUILD" M="$DRV" \
+            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" HOSTCC=gcc-9 \
+            CONFIG_88XXAU=m \
+            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y \
+            KSRC="$KERNEL_BUILD" \
+            modules 2>&1 | tee "$RUNNER_TEMP/driver-build.log"
+          status=${PIPESTATUS[0]}
+          echo "make exit status: $status"
+          echo "--- compile errors ---"
+          grep -E ' error[: ]|undefined reference|\*\*\*' "$RUNNER_TEMP/driver-build.log" | head -60 || true
+          test -f "$DRV/88XXau.ko"
 
-          # Config-drift report: every option whose value differs from the TV.
-          norm() { grep -E '^(CONFIG_|# CONFIG_)' "$1" | sed -E 's/^# (CONFIG_[A-Za-z0-9_]+) is not set$/\1=n/' | sort; }
-          norm tv-kernel.config > "$RUNNER_TEMP/tv.norm"
-          norm "$KERNEL_BUILD/.config" > "$RUNNER_TEMP/new.norm"
-          echo "== options only in the TV config (LG-only or dropped by vanilla Kconfig) =="
-          comm -23 <(cut -d= -f1 "$RUNNER_TEMP/tv.norm" | sort -u) \
-                   <(cut -d= -f1 "$RUNNER_TEMP/new.norm" | sort -u) | tr '\n' ' '; echo
-          echo "== options present in both whose value changed (TV=new) =="
-          join -t= -j1 <(LC_ALL=C sort -t= -k1,1 "$RUNNER_TEMP/tv.norm") \
-                       <(LC_ALL=C sort -t= -k1,1 "$RUNNER_TEMP/new.norm") | awk -F= '$2!=$3'
-          # These three must match the TV or the module ABI is wrong.
-          for sym in PINCTRL WIRELESS_EXT WEXT_CORE; do
-            if ! grep -q "^CONFIG_${sym}=y$" "$KERNEL_BUILD/.config"; then
-              echo "CONFIG_${sym} is not =y; struct layouts would not match the TV"
-              exit 1
-            fi
-          done
-          if grep -qE '^CONFIG_ATH9K_HTC_DEBUGFS=(y|m)$' "$KERNEL_BUILD/.config"; then
-            echo "HTC spectral debugfs must remain disabled"
-            grep -E '^CONFIG_ATH9K_HTC_DEBUGFS=' "$KERNEL_BUILD/.config"
-            exit 1
-          fi
-          if grep -qE '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=y$' "$KERNEL_BUILD/.config"; then
-            echo "Unsupported LED or PCI ath9k debug options are enabled"
-            grep -E '^CONFIG_(MAC80211_LEDS|ATH9K_DEBUGFS)=' "$KERNEL_BUILD/.config"
-            exit 1
-          fi
-          cp "$KERNEL_BUILD/.config" kernel-config.final
-
-          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
-            modules_prepare 2>&1 | tee -a kernel-build.log
-          # The LG prepared output contains stale wireless objects built with
-          # its original config. Remove only these generated output dirs so
-          # Kbuild recompiles the wireless stack against this config/source.
-          rm -rf "$KERNEL_BUILD/drivers/net/wireless/ath" \
-                 "$KERNEL_BUILD/net/mac80211"
-          # Build enabled modules in one Kbuild pass so modpost sees the full
-          # mac80211/ath symbol set and writes correct inter-module dependencies.
-          make -C "$KERNEL_SRC" O="$KERNEL_BUILD" ARCH=arm64 \
-            CROSS_COMPILE=aarch64-linux-gnu- HOSTCFLAGS="$hostflags" \
-            KCFLAGS="-fno-pic -fno-stack-protector" \
-            modules 2>&1 | tee -a kernel-build.log
-          if grep -q 'WARNING: .*undefined!' kernel-build.log; then
-            echo "Module modpost reported unresolved symbols"
-            grep 'WARNING: .*undefined!' kernel-build.log
-            exit 1
-          fi
-
-          mkdir -p "$RUNNER_TEMP/ar9271-output/ath9k_htc"
-          find "$KERNEL_BUILD" -type f \
-            \( -name mac80211.ko -o -name ath.ko -o -name ath9k_hw.ko \
-               -o -name ath9k_common.ko -o -name ath9k_htc.ko \
-               -o -name mac80211_hwsim.ko \) \
-            -exec cp '{}' "$RUNNER_TEMP/ar9271-output/" \;
-          # The TV kernel has no CCM/GCM (CONFIG_CRYPTO_CCM/GCM are not set) but
-          # mac80211 needs them for WPA2-CCMP/GCMP. Collect them in a separate
-          # folder; load them only after the five modules above work.
-          mkdir -p "$RUNNER_TEMP/ar9271-output/crypto-extra"
-          find "$KERNEL_BUILD" -type f \
-            \( -name ccm.ko -o -name ctr.ko -o -name gcm.ko -o -name ghash-generic.ko \
-               -o -name gf128mul.ko -o -name seqiv.ko \) \
-            -exec cp '{}' "$RUNNER_TEMP/ar9271-output/crypto-extra/" \;
-          ls -l "$RUNNER_TEMP/ar9271-output/crypto-extra"
-          find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -print -exec sh -c 'echo vermagic:; modinfo -F vermagic "$1"; echo depends:; modinfo -F depends "$1"' sh '{}' \;
-          test "$(find "$RUNNER_TEMP/ar9271-output" -name ath9k_htc.ko | wc -l)" -eq 1
-          test "$(find "$RUNNER_TEMP/ar9271-output" -name mac80211_hwsim.ko | wc -l)" -eq 1
-          test "$(find "$RUNNER_TEMP/ar9271-output" -name relay.ko | wc -l)" -eq 0
-          if find "$RUNNER_TEMP/ar9271-output" -name '*.ko' -exec modinfo -F depends '{}' \; | grep -qw relay; then
-            echo "A WLAN module unexpectedly depends on relay"
-            exit 1
-          fi
-          if aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -Eq '[[:space:]](relay_[[:alnum:]_]+|ath9k_cmn_spectral_[[:alnum:]_]+|ath_cmn_process_fft)'; then
-            echo "A WLAN module imports relay or omitted spectral symbols"
-            aarch64-linux-gnu-nm -u "$RUNNER_TEMP/ar9271-output"/*.ko | grep -E '[[:space:]](relay_[[:alnum:]_]+|ath9k_cmn_spectral_[[:alnum:]_]+|ath_cmn_process_fft)'
-            exit 1
-          fi
-
-      - name: Fetch AR9271 firmware on runner
+      - name: Check the module against LG's kernel
         run: |
           set -euo pipefail
-          curl -fL --retry 3 \
-            https://raw.githubusercontent.com/thesofproject/linux-firmware/master/ath9k_htc/htc_9271-1.4.0.fw \
-            -o "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271-1.4.0.fw"
-          cp "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271-1.4.0.fw" \
-            "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271.fw"
-          file "$RUNNER_TEMP/ar9271-output/ath9k_htc/htc_9271.fw"
+          ko="$DRV/88XXau.ko"
+          rel="$(cat "$KERNEL_BUILD/include/config/kernel.release")"
+          file "$ko"
+          ls -l "$ko"
+          modinfo "$ko" | grep -E '^(filename|license|description|version|vermagic|depends|name|srcversion)' || true
+          vm="$(modinfo -F vermagic "$ko")"
+          echo "vermagic: $vm"
+          case "$vm" in
+            "$rel "*) echo "vermagic starts with LG kernel.release ($rel): OK" ;;
+            *) echo "::error::vermagic '$vm' does not start with '$rel'"; exit 1 ;;
+          esac
+          echo "TV expects: $rel SMP preempt mod_unload aarch64  (CONFIG_MODVERSIONS is off)"
 
-      - name: Save AR9271 build artifacts
-        if: always()
+          # With MODVERSIONS off, a missing kernel export only shows up at insmod
+          # time as "Unknown symbol". LG's Module.symvers lists everything exported,
+          # so check here instead of on the TV.
+          aarch64-linux-gnu-nm -u "$ko" | awk '{print $2}' | sort -u > "$RUNNER_TEMP/undef.txt"
+          awk '{print $2}' "$KERNEL_BUILD/Module.symvers" | sort -u > "$RUNNER_TEMP/exported.txt"
+          comm -23 "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/exported.txt" > "$RUNNER_TEMP/missing.txt"
+          echo "undefined symbols in 88XXau.ko: $(wc -l < "$RUNNER_TEMP/undef.txt")"
+          echo "not exported by LG's kernel: $(wc -l < "$RUNNER_TEMP/missing.txt")"
+          cat "$RUNNER_TEMP/missing.txt"
+          if [ -s "$RUNNER_TEMP/missing.txt" ]; then
+            echo "::warning::Some symbols are not in Module.symvers; insmod will say Unknown symbol for these"
+          fi
+
+      - name: Save artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp "$DRV/88XXau.ko" out/88XXau.debug.ko
+          cp "$DRV/88XXau.ko" out/88XXau.ko
+          "$STRIP" --strip-debug out/88XXau.ko
+          ls -l out
+          cp "$RUNNER_TEMP/driver-build.log" out/
+          cp "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/missing.txt" out/
+          cp "$KERNEL_BUILD/.config" out/lg-kernel.config
+          (cd out && sha256sum 88XXau.ko > 88XXau.ko.sha256 && cat 88XXau.ko.sha256)
+
+      - name: Upload module and logs
         uses: actions/upload-artifact@v4
         with:
-          name: ar9271-ath9k-htc-probe
-          path: |
-            kernel-build.log
-            kernel-config.final
-            ${{ runner.temp }}/ar9271-output
-          if-no-files-found: warn
-          retention-days: 14
+          name: rtl8812au-88XXau
+          path: out/
+          if-no-files-found: error
