@@ -124,6 +124,9 @@ jobs:
             diff -rq "$KERNEL_SRC/$p" "$LG/$p" 2>&1 | grep -v "^Only in $KERNEL_SRC" | head -60 || true
           done
 
+      - name: Add TVDBG step markers to the ath9k_htc init path
+        run: python3 "$GITHUB_WORKSPACE/tvdbg_markers.py" "$KERNEL_SRC"
+
       - name: Enable and build AR9271 modules only
         run: |
           set -euo pipefail
