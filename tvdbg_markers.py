@@ -8,6 +8,10 @@ ring (and on the UART console when the console loglevel is raised) no matter
 what the log level settings are.  The last TVDBG line seen before the TV dies
 tells us which step it was in.
 
+"Slow" markers (process context only) also msleep() so the log writer on the
+TV can flush the line to disk before the next step runs.  A crash can then only
+lose the step it is in, not the ones before it.  Set SLEEP_MS below if needed.
+
 Every anchor must match exactly once; the script stops with an error otherwise,
 so a silent half-patch can never be built.
 """
@@ -19,6 +23,7 @@ root = Path(sys.argv[1]) / "drivers/net/wireless/ath/ath9k"
 if not root.is_dir():
     sys.exit(f"not found: {root}")
 
+SLEEP_MS = 600
 P = 'printk(KERN_EMERG "TVDBG %s\\n");'
 # counted marker for callbacks that fire many times: only the first N print
 def counted(fmt, args=""):
@@ -29,6 +34,10 @@ def counted(fmt, args=""):
 
 def mark(text):
     return P % text
+
+
+def slow(text):
+    return P % text + f" msleep({SLEEP_MS});"
 
 
 def edit(name, pairs):
@@ -50,25 +59,27 @@ def edit(name, pairs):
             src = re.sub(pat, lambda m: m.group(0) + "\t" + payload + "\n", src, count=1, flags=re.S)
         else:
             src = re.sub(pat, lambda m: rep, src, count=1, flags=re.S)
+    if "linux/delay.h" not in src:
+        src = src.replace("#include", "#include <linux/delay.h>\n#include", 1)
     path.write_text(src)
     print(f"patched {name}: {len(pairs)} markers")
 
 
 edit("hif_usb.c", [
     ("before", "\tret = ath9k_hif_usb_dev_init(hif_dev);\n\tif (ret)\n\t\tgoto err_dev_init;",
-     mark("fw_cb: before dev_init")),
+     slow("fw_cb: before dev_init")),
     ("before", "\tret = ath9k_htc_hw_init(hif_dev->htc_handle,",
-     mark("fw_cb: dev_init ok, before htc_hw_init")),
+     slow("fw_cb: dev_init ok, before htc_hw_init")),
     ("before", "\trelease_firmware(fw);\n\thif_dev->flags |= HIF_USB_READY;",
-     mark("fw_cb: htc_hw_init returned ok")),
+     slow("fw_cb: htc_hw_init returned ok")),
     ("before", "\t/* Alloc URBs */\n\tret = ath9k_hif_usb_alloc_urbs(hif_dev);",
-     mark("dev_init: firmware downloaded, before alloc_urbs")),
+     slow("dev_init: firmware downloaded, before alloc_urbs")),
     ("before", "\t/* RX */\n\tif (ath9k_hif_usb_alloc_rx_urbs(hif_dev) < 0)",
-     mark("alloc_urbs: tx ok, before rx urbs")),
+     slow("alloc_urbs: tx ok, before rx urbs")),
     ("before", "\t/* Register Read */\n\tif (ath9k_hif_usb_alloc_reg_in_urbs(hif_dev) < 0)",
-     mark("alloc_urbs: rx ok, before reg_in urbs")),
+     slow("alloc_urbs: rx ok, before reg_in urbs")),
     ("before", "\treturn 0;\nerr_reg:",
-     mark("alloc_urbs: all urbs ok")),
+     slow("alloc_urbs: all urbs ok")),
     ("after_re",
      r"static void ath9k_hif_usb_reg_in_cb\(struct urb \*urb\)\n\{.*?\tint ret;\n\n",
      counted("reg_in_cb status=%d len=%d", "urb->status, urb->actual_length")),
@@ -79,38 +90,44 @@ edit("hif_usb.c", [
 
 edit("htc_hst.c", [
     ("before", "\tret = htc_config_pipe_credits(target);",
-     mark("htc_init: before config_pipe_credits")),
+     slow("htc_init: before config_pipe_credits")),
     ("before", "\treturn htc_setup_complete(target);",
-     mark("htc_init: before setup_complete")),
+     slow("htc_init: before setup_complete")),
     ("after_re",
      r"\tunsigned long time_left;\n\n(?=\t/\* Find an available endpoint \*/)",
-     counted("htc_connect_service id=0x%x", "service_connreq->service_id")),
+     'printk(KERN_EMERG "TVDBG connect_service enter id=0x%x\\n", service_connreq->service_id); msleep(' + str(SLEEP_MS) + ');'),
+    ("before", "\tret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0);\n\tif (ret)\n\t\tgoto err;\n\n\ttime_left = wait_for_completion_timeout(&target->cmd_wait, HZ);\n\tif (!time_left) {\n\t\tdev_err(target->dev, \"Service connection timeout",
+     slow("connect_service: before htc_issue_send")),
+    ("before", "\ttime_left = wait_for_completion_timeout(&target->cmd_wait, HZ);\n\tif (!time_left) {\n\t\tdev_err(target->dev, \"Service connection timeout",
+     slow("connect_service: request sent, before wait")),
+    ("before", "\t*conn_rsp_epid = target->conn_rsp_epid;\n\treturn 0;",
+     slow("connect_service: response received")),
     ("before", "\thtc_hdr = (struct htc_frame_hdr *) skb->data;\n\tepid = htc_hdr->endpoint_id;",
      counted("htc_rx_msg len=%u pipe=%u", "(unsigned)len, (unsigned)pipe_id")),
 ])
 
 edit("htc_drv_init.c", [
     ("before", "\tret = ath9k_htc_wait_for_target(priv);\n\tif (ret)\n\t\tgoto err_free;\n\n\tpriv->wmi",
-     mark("probe: alloc_hw ok, before wait_for_target")),
+     slow("probe: alloc_hw ok, before wait_for_target")),
     ("before", "\tpriv->wmi = ath9k_init_wmi(priv);",
-     mark("probe: target ready, before init_wmi")),
+     slow("probe: target ready, before init_wmi")),
     ("before", "\tret = ath9k_init_htc_services(priv, devid, drv_info);\n\tif (ret)\n\t\tgoto err_init;\n\n\tret = ath9k_init_device",
-     mark("probe: wmi ok, before init_htc_services")),
+     slow("probe: wmi ok, before init_htc_services")),
     ("before", "\tret = ath9k_init_device(priv, devid, product, drv_info);",
-     mark("probe: htc services ok, before init_device")),
+     slow("probe: htc services ok, before init_device")),
     ("before", "\tret = htc_init(priv->htc);",
-     mark("svc: all services connected, before htc_init")),
+     slow("svc: all services connected, before htc_init")),
     ("before", "\t/* Bring up device */\n\terror = ath9k_init_priv(priv, devid, product, drv_info);",
-     mark("init_device: before init_priv")),
+     slow("init_device: before init_priv")),
     ("before", "\tah = priv->ah;\n\tcommon = ath9k_hw_common(ah);\n\tath9k_set_hw_capab(priv, hw);",
-     mark("init_device: init_priv ok")),
+     slow("init_device: init_priv ok")),
     ("before", "\t/* Register with mac80211 */\n\terror = ieee80211_register_hw(hw);",
-     mark("init_device: before ieee80211_register_hw")),
+     slow("init_device: before ieee80211_register_hw")),
     ("before", "\t/* Handle world regulatory */",
-     mark("init_device: ieee80211_register_hw ok")),
+     slow("init_device: ieee80211_register_hw ok")),
     ("before", "\tret = ath9k_hw_init(ah);\n\tif (ret) {\n\t\tath_err(common,\n\t\t\t\"Unable to initialize hardware;",
-     mark("init_priv: before ath9k_hw_init")),
+     slow("init_priv: before ath9k_hw_init")),
     ("before", "\tret = ath9k_init_queues(priv);",
-     mark("init_priv: ath9k_hw_init ok, before init_queues")),
+     slow("init_priv: ath9k_hw_init ok, before init_queues")),
 ])
 print("done")
