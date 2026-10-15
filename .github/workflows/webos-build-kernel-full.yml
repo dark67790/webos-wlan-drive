@@ -28,8 +28,8 @@ permissions:
   contents: read
 
 env:
-  TOOLCHAIN_URL: https://drive.google.com/file/d/1Oe0g49VU2mARleb6utWjI95FHMIQqOku/view
-  KERNEL_URL: https://drive.google.com/file/d/1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2/view
+  TOOLCHAIN_ID: 1Oe0g49VU2mARleb6utWjI95FHMIQqOku
+  KERNEL_ID: 1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2
 
 jobs:
   build:
@@ -55,8 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dl"
-          "$HOME/.local/bin/gdown" --fuzzy "$TOOLCHAIN_URL" -O "$RUNNER_TEMP/dl/toolchain.tar.gz"
-          "$HOME/.local/bin/gdown" --fuzzy "$KERNEL_URL"    -O "$RUNNER_TEMP/dl/webos-kernel.tar.gz"
+          "$HOME/.local/bin/gdown" "$TOOLCHAIN_ID" -O "$RUNNER_TEMP/dl/toolchain.tar.gz"
+          "$HOME/.local/bin/gdown" "$KERNEL_ID"    -O "$RUNNER_TEMP/dl/webos-kernel.tar.gz"
           ls -l "$RUNNER_TEMP/dl"
           file "$RUNNER_TEMP/dl"/*
 
