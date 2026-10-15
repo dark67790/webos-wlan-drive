@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/rtl8812au-module-build.yml
+      - tv-kernel.config
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
+      - name: Check out build configuration (tv-kernel.config)
+        uses: actions/checkout@v4
+
       - name: Install AArch64 kernel build tools
         run: |
           sudo apt-get update
@@ -111,6 +115,118 @@ jobs:
             echo "::warning::LG tree says '$rel' but the TV reports '$TV_RELEASE'"
           fi
 
+      - name: Probe struct layout, then apply the TV's real config to the generated headers
+        run: |
+          set -uo pipefail
+          # The first oops on the TV was in cfg80211's wiphy_apply_custom_regulatory:
+          # it read a wiphy->bands[] slot that held the driver's reg_notifier function
+          # pointer, i.e. struct wiphy is laid out differently in the module than in the
+          # TV's built-in cfg80211. struct wiphy has 16 bytes (wowlan, wowlan_config)
+          # that exist only with CONFIG_PM, and LG's prepared .config is the config of
+          # the MT7921 driver package, not necessarily the TV's. Make the generated
+          # headers (autoconf.h, auto.conf) match the config captured from the TV.
+          # .config itself is NOT touched, so kbuild never re-runs (silent)oldconfig.
+          probe="$RUNNER_TEMP/probe"
+          mkdir -p "$probe"
+          cat > "$probe/probe.c" <<'CSRC'
+          #include <linux/module.h>
+          #include <linux/stddef.h>
+          #include <linux/netdevice.h>
+          #include <linux/usb.h>
+          #include <net/cfg80211.h>
+          #define X(n, v) const int n = (v)
+          X(wiphy_size, sizeof(struct wiphy));
+          X(wiphy_off_bands, offsetof(struct wiphy, bands));
+          X(wiphy_off_reg_notifier, offsetof(struct wiphy, reg_notifier));
+          X(wiphy_off_regd, offsetof(struct wiphy, regd));
+          X(wiphy_off_dev, offsetof(struct wiphy, dev));
+          X(num_bands, IEEE80211_NUM_BANDS);
+          X(device_size, sizeof(struct device));
+          X(netdev_size, sizeof(struct net_device));
+          X(netdev_off_netdev_ops, offsetof(struct net_device, netdev_ops));
+          X(wdev_size, sizeof(struct wireless_dev));
+          X(usb_device_size, sizeof(struct usb_device));
+          X(usb_interface_size, sizeof(struct usb_interface));
+          X(sk_buff_size, sizeof(struct sk_buff));
+          #ifdef CONFIG_PM
+          X(cfg_pm, 1);
+          #else
+          X(cfg_pm, 0);
+          #endif
+          MODULE_LICENSE("GPL");
+          CSRC
+          sed -i 's/^          //' "$probe/probe.c"
+          echo 'obj-m := probe.o' > "$probe/Makefile"
+          cat > "$RUNNER_TEMP/probe.py" <<'PYCODE'
+          import re, sys
+          t = open(sys.argv[1]).read()
+          for m in re.finditer(r'^((?:wiphy|num|device|netdev|wdev|usb|sk_buff|cfg)_[a-z_0-9]+):\n\s*\.(?:word|long|4byte)\s+(\d+)', t, re.M):
+              print("  %-26s %5d  (0x%x)" % (m.group(1), int(m.group(2)), int(m.group(2))))
+          PYCODE
+          sed -i 's/^          //' "$RUNNER_TEMP/probe.py"
+          run_probe() {
+            rm -f "$probe/probe.s"
+            make -C "$KERNEL_BUILD" M="$probe" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+              CC="$CC" HOSTCC=gcc-9 probe.s > "$probe/probe.log" 2>&1 \
+              || { echo "probe build failed:"; tail -15 "$probe/probe.log"; return 0; }
+            python3 -I "$RUNNER_TEMP/probe.py" "$probe/probe.s"
+          }
+
+          echo "== layout with LG's prepared headers (as shipped)"
+          run_probe | tee "$RUNNER_TEMP/layout-lg.txt"
+
+          echo "== options that differ between LG's .config and the TV's config (first 80)"
+          norm() { grep -E '^(CONFIG_|# CONFIG_)' "$1" | sed -E 's/^# (CONFIG_[A-Za-z0-9_]+) is not set$/\1=n/' | LC_ALL=C sort -t= -k1,1; }
+          norm "$KERNEL_BUILD/.config" > "$RUNNER_TEMP/lg.norm"
+          norm tv-kernel.config > "$RUNNER_TEMP/tv.norm"
+          join -t= -a1 -a2 -e '<absent>' -o 0,1.2,2.2 "$RUNNER_TEMP/lg.norm" "$RUNNER_TEMP/tv.norm" \
+            | awk -F= '{a=$2; b=$3; if (a=="<absent>") a="n"; if (b=="<absent>") b="n";
+                        if (a!=b) printf "  %s  LG=%s  TV=%s\n", $1, $2, $3}' > "$RUNNER_TEMP/config-diff.txt"
+          echo "  total differing options: $(wc -l < "$RUNNER_TEMP/config-diff.txt")"
+          head -80 "$RUNNER_TEMP/config-diff.txt"
+          grep -E 'CONFIG_(PM|PM_SLEEP|PINCTRL|WIRELESS_EXT|WEXT_CORE|CFG80211_WEXT|PREEMPT|SMP|MODULES|MODVERSIONS)\b' \
+            "$RUNNER_TEMP/config-diff.txt" || true
+
+          echo "== regenerating autoconf.h and auto.conf from tv-kernel.config"
+          cp "$KERNEL_BUILD/include/generated/autoconf.h" "$RUNNER_TEMP/autoconf.h.lg"
+          cp "$KERNEL_BUILD/include/config/auto.conf" "$RUNNER_TEMP/auto.conf.lg"
+          python3 -I - tv-kernel.config "$KERNEL_BUILD" <<'PYCODE'
+          import re, sys
+          from pathlib import Path
+          cfg, build = Path(sys.argv[1]), Path(sys.argv[2])
+          conf_lines, h_lines = [], []
+          for line in cfg.read_text().splitlines():
+              m = re.match(r'^(CONFIG_[A-Za-z0-9_]+)=(.*)$', line)
+              if not m:
+                  continue
+              name, val = m.groups()
+              conf_lines.append(f"{name}={val}")
+              if val == "y":
+                  h_lines.append(f"#define {name} 1")
+              elif val == "m":
+                  h_lines.append(f"#define {name}_MODULE 1")
+              else:                       # strings keep their quotes, numbers/hex as is
+                  h_lines.append(f"#define {name} {val}")
+          hdr = "/*\n *\n * Automatically generated file; DO NOT EDIT.\n * Regenerated from tv-kernel.config\n *\n */\n"
+          (build / "include/generated/autoconf.h").write_text(hdr + "\n".join(h_lines) + "\n")
+          (build / "include/config/auto.conf").write_text(
+              "#\n# Automatically generated file; DO NOT EDIT.\n#\n" + "\n".join(conf_lines) + "\n")
+          print(f"wrote {len(h_lines)} defines")
+          PYCODE
+          # auto.conf/autoconf.h must be newer than .config or kbuild re-runs oldconfig
+          touch "$KERNEL_BUILD/include/config/auto.conf" "$KERNEL_BUILD/include/generated/autoconf.h"
+          for sym in PM PINCTRL WIRELESS_EXT WEXT_CORE PREEMPT SMP MODULES; do
+            grep -q "^#define CONFIG_${sym} 1$" "$KERNEL_BUILD/include/generated/autoconf.h" \
+              || { echo "::error::CONFIG_${sym} missing from regenerated autoconf.h"; exit 1; }
+          done
+          grep -q '^#define CONFIG_MODVERSIONS' "$KERNEL_BUILD/include/generated/autoconf.h" \
+            && { echo "::error::TV has no MODVERSIONS but autoconf.h defines it"; exit 1; }
+
+          echo "== layout with the TV's config"
+          run_probe | tee "$RUNNER_TEMP/layout-tv.txt"
+          echo "(oops on the TV: the kernel's wiphy->bands[2] slot held reg_notifier, i.e."
+          echo " kernel bands offset = module bands offset + 16 with the LG headers)"
+
       - name: Fetch rtl8812au (pinned commit)
         run: |
           set -euo pipefail
@@ -175,10 +291,9 @@ jobs:
       - name: Build 88XXau.ko against LG's prepared tree
         run: |
           set -uo pipefail
-          # No .config change, no olddefconfig: LG's own .config, generated headers
-          # and Module.symvers are used exactly as shipped, so struct layouts match
-          # the TV kernel (an earlier vanilla olddefconfig dropped LG's PINCTRL and
-          # WIRELESS_EXT, which changes struct device / net_device layouts).
+          # No olddefconfig: LG's prepared tree and Module.symvers are used, with
+          # autoconf.h/auto.conf regenerated from the TV's own config above, so struct
+          # layouts (struct wiphy has CONFIG_PM members) match the TV kernel.
           #
           # Driver switches:
           #   CONFIG_88XXAU=m            the driver Makefile only sets this when invoked
@@ -240,6 +355,7 @@ jobs:
           cp "$RUNNER_TEMP/driver-build.log" out/
           cp "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/missing.txt" out/
           cp "$KERNEL_BUILD/.config" out/lg-kernel.config
+          cp "$RUNNER_TEMP"/layout-lg.txt "$RUNNER_TEMP"/layout-tv.txt "$RUNNER_TEMP"/config-diff.txt out/ || true
           (cd out && sha256sum 88XXau.ko > 88XXau.ko.sha256 && cat 88XXau.ko.sha256)
 
       - name: Upload module and logs
