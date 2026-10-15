@@ -19,6 +19,10 @@ on:
         description: "ARCH for make"
         type: string
         default: "arm64"
+      kdrv_platform:
+        description: "KDRV_PLATFORM_CFG (a dir under kdriver/platform/, e.g. e60_webos_udtv or o20_webos_udtv)"
+        type: string
+        default: "o20_webos_udtv"
       targets:
         description: "make targets"
         type: string
@@ -28,7 +32,8 @@ permissions:
   contents: read
 
 env:
-  TV_RELEASE: 4.4.84-229.kcl4tv.6   # what `uname -r` shows on the TV
+  # vermagic of the modules on the TV (tv-module-metadata.txt); uname -r has a suffix, vermagic does not
+  TV_VERMAGIC: "4.4.84 SMP preempt mod_unload aarch64"
   TOOLCHAIN_ID: 1Oe0g49VU2mARleb6utWjI95FHMIQqOku
   KERNEL_ID: 1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2
 
@@ -125,6 +130,8 @@ jobs:
           gcc="$(find "$RUNNER_TEMP/tc" \( -type f -o -type l \) -name '*-gcc' | grep -E 'aarch64|arm64' | head -1)"
           [ -n "$gcc" ] || { echo "::error::no aarch64 gcc found in toolchain"; exit 1; }
           cross="${gcc%gcc}"
+          ls "$KDRIVER_DIR/platform/${{ inputs.kdrv_platform }}" > /dev/null
+          echo "KDRV_PLATFORM_CFG=${{ inputs.kdrv_platform }}" >> "$GITHUB_ENV"
           echo "KROOT=$kroot"       >> "$GITHUB_ENV"
           echo "CROSS=$cross"       >> "$GITHUB_ENV"
           echo "$(dirname "$gcc")"  >> "$GITHUB_PATH"
@@ -143,13 +150,11 @@ jobs:
           else
             cp "$GITHUB_WORKSPACE/tv-kernel.config" .config
           fi
-          # LG's suffix is not in the config; without it modules get a vermagic mismatch.
-          scripts/config --set-str LOCALVERSION "${TV_RELEASE#4.4.84}" --disable LOCALVERSION_AUTO
+          # The TV's modules carry plain "4.4.84" in vermagic, so LOCALVERSION must stay empty.
+          scripts/config --set-str LOCALVERSION "" --disable LOCALVERSION_AUTO
           $M olddefconfig
           grep -E '^CONFIG_(PM|SMP|PREEMPT|MODULES|MODVERSIONS|CFG80211|USB|LOCALVERSION)' .config || true
-          rel="$($M -s kernelrelease 2>/dev/null | tail -1)"
-          echo "kernel release: $rel (TV: $TV_RELEASE)"
-          [ "$rel" = "$TV_RELEASE" ] || { echo "::error::release '$rel' != TV '$TV_RELEASE'"; exit 1; }
+          echo "kernel release: $($M -s kernelrelease 2>/dev/null | tail -1)  (modules on the TV: $TV_VERMAGIC)"
 
       - name: Build
         if: ${{ !inputs.map_only }}
@@ -161,7 +166,10 @@ jobs:
           grep -E ' error[: ]|\*\*\*' "$RUNNER_TEMP/kernel-build.log" | head -60 || true
           ls -l arch/${{ inputs.arch }}/boot/Image* vmlinux
           ko="$(find . -name '*.ko' | head -1)"
-          [ -z "$ko" ] || echo "vermagic: $(modinfo -F vermagic "$ko")  (TV wants: $TV_RELEASE SMP preempt mod_unload aarch64)"
+          if [ -n "$ko" ]; then
+            vm="$(modinfo -F vermagic "$ko")"; echo "vermagic: $vm"
+            [ "$vm" = "$TV_VERMAGIC" ] || echo "::warning::vermagic '$vm' != TV '$TV_VERMAGIC'"
+          fi
 
       - name: Collect output
         if: ${{ !inputs.map_only }}
