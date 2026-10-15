@@ -1,0 +1,176 @@
+name: redtap transparent-proxy build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Install AArch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Write redtap.c
+        run: |
+          cat > redtap.c <<'CSRC'
+          /* redtap.c - minimal transparent TCP proxy for testing REDIRECT +
+           * SO_ORIGINAL_DST + SO_BINDTODEVICE. No SOCKS, no tun/tap.
+           * Usage: redtap <listen-port> <egress-iface> <mark>
+           *   e.g.  redtap 12345 wlan1 0x1
+           */
+          #define _GNU_SOURCE
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <linux/netfilter_ipv4.h>
+          #include <netinet/in.h>
+          #include <signal.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/socket.h>
+          #include <sys/wait.h>
+          #include <unistd.h>
+
+          #ifndef SO_MARK
+          #define SO_MARK 36
+          #endif
+
+          static const char *g_iface;
+          static unsigned g_mark;
+
+          static void copy_loop(int from, int to) {
+              char buf[16384];
+              ssize_t n;
+              while ((n = read(from, buf, sizeof(buf))) > 0) {
+                  ssize_t off = 0;
+                  while (off < n) {
+                      ssize_t w = write(to, buf + off, n - off);
+                      if (w <= 0) { shutdown(to, SHUT_WR); return; }
+                      off += w;
+                  }
+              }
+              shutdown(to, SHUT_WR);
+          }
+
+          static void handle(int client) {
+              struct sockaddr_in dst;
+              socklen_t dl = sizeof(dst);
+
+              if (getsockopt(client, SOL_IP, SO_ORIGINAL_DST, &dst, &dl) < 0) {
+                  fprintf(stderr, "SO_ORIGINAL_DST failed: %s\n", strerror(errno));
+                  close(client);
+                  return;
+              }
+
+              char ipbuf[INET_ADDRSTRLEN];
+              inet_ntop(AF_INET, &dst.sin_addr, ipbuf, sizeof(ipbuf));
+              fprintf(stderr, "redirect -> %s:%d via %s (mark 0x%x)\n",
+                      ipbuf, ntohs(dst.sin_port), g_iface, g_mark);
+
+              int remote = socket(AF_INET, SOCK_STREAM, 0);
+              if (remote < 0) {
+                  fprintf(stderr, "socket() failed: %s\n", strerror(errno));
+                  close(client);
+                  return;
+              }
+
+              if (setsockopt(remote, SOL_SOCKET, SO_BINDTODEVICE, g_iface, strlen(g_iface)) < 0) {
+                  fprintf(stderr, "SO_BINDTODEVICE(%s) failed: %s\n", g_iface, strerror(errno));
+                  close(remote);
+                  close(client);
+                  return;
+              }
+
+              if (setsockopt(remote, SOL_SOCKET, SO_MARK, &g_mark, sizeof(g_mark)) < 0) {
+                  fprintf(stderr, "SO_MARK failed (continuing anyway): %s\n", strerror(errno));
+              }
+
+              if (connect(remote, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
+                  fprintf(stderr, "connect() to %s:%d failed: %s\n", ipbuf, ntohs(dst.sin_port), strerror(errno));
+                  close(remote);
+                  close(client);
+                  return;
+              }
+
+              fprintf(stderr, "connected to %s:%d via %s, relaying\n", ipbuf, ntohs(dst.sin_port), g_iface);
+
+              pid_t pid = fork();
+              if (pid == 0) {
+                  copy_loop(remote, client);
+                  _exit(0);
+              }
+              copy_loop(client, remote);
+              close(client);
+              close(remote);
+          }
+
+          int main(int argc, char **argv) {
+              if (argc < 4) {
+                  fprintf(stderr, "usage: %s <listen-port> <egress-iface> <mark>\n", argv[0]);
+                  return 1;
+              }
+              signal(SIGCHLD, SIG_IGN);
+
+              int port = atoi(argv[1]);
+              g_iface = argv[2];
+              g_mark = (unsigned)strtoul(argv[3], NULL, 0);
+
+              int srv = socket(AF_INET, SOCK_STREAM, 0);
+              if (srv < 0) { perror("socket"); return 1; }
+
+              int one = 1;
+              setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+              struct sockaddr_in addr;
+              memset(&addr, 0, sizeof(addr));
+              addr.sin_family = AF_INET;
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              addr.sin_port = htons((uint16_t)port);
+
+              if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
+              if (listen(srv, 128) < 0) { perror("listen"); return 1; }
+
+              fprintf(stderr, "redtap listening on 127.0.0.1:%d -> egress %s (mark 0x%x)\n", port, g_iface, g_mark);
+
+              for (;;) {
+                  int c = accept(srv, NULL, NULL);
+                  if (c < 0) {
+                      if (errno == EINTR) continue;
+                      perror("accept");
+                      continue;
+                  }
+                  pid_t pid = fork();
+                  if (pid == 0) {
+                      close(srv);
+                      handle(c);
+                      _exit(0);
+                  }
+                  close(c);
+              }
+              return 0;
+          }
+          CSRC
+          sed -i 's/^          //' redtap.c
+
+      - name: Build static aarch64 binary
+        run: |
+          aarch64-linux-gnu-gcc -O2 -static -o redtap redtap.c
+          file redtap
+          aarch64-linux-gnu-strip redtap
+          ls -l redtap
+          sha256sum redtap | tee redtap.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redtap
+          path: |
+            redtap
+            redtap.sha256
+          if-no-files-found: error
