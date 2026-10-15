@@ -236,9 +236,112 @@ jobs:
           echo "(oops on the TV: the kernel's wiphy->bands[2] slot held reg_notifier, i.e."
           echo " kernel bands offset = module bands offset + 16 with the LG headers)"
 
+      - name: Build wiphy layout probe module (safe, touches no hardware)
+        run: |
+          set -u
+          # Loading wiphy_probe.ko on the TV tells us where the TV's cfg80211 really keeps
+          # wiphy->bands and regulatory_flags, to compare with what this module was compiled
+          # with. It only works on fake memory and unloads itself (insmod reports an error on
+          # purpose); read the result with: dmesg | grep WPROBE
+          wp="$RUNNER_TEMP/wprobe"
+          mkdir -p "$wp"
+          cat > "$wp/wiphy_probe.c" <<'CSRC'
+          // Safe layout probe: builds a FAKE zeroed "wiphy" in plain kernel memory, plants a pointer to
+          // a one-channel band in every 8-byte slot of a window, and calls the kernel's own
+          // wiphy_apply_custom_regulatory() on it. The slots the kernel actually dereferences as
+          // wiphy->bands[0..2] get their channel modified, which reveals where the TV's cfg80211
+          // really keeps wiphy->bands. It also reveals where the kernel keeps regulatory_flags.
+          // No real device or wiphy is touched.
+          #include <linux/module.h>
+          #include <linux/slab.h>
+          #include <linux/stddef.h>
+          #include <net/cfg80211.h>
+
+          #define SLOT_LO 0x40
+          #define SLOT_HI 0x1c0
+          #define NSLOT ((SLOT_HI - SLOT_LO) / 8)
+
+          static int __init wprobe_init(void)
+          {
+          	struct ieee80211_regdomain *regd;
+          	struct ieee80211_channel *ch;
+          	struct ieee80211_supported_band *sb;
+          	u8 *fake;
+          	int i, hits = 0;
+
+          	printk(KERN_ERR "WPROBE: module view: sizeof(wiphy)=0x%x bands=0x%x reg_notifier=0x%x regd=0x%x regulatory_flags=0x%x NUM_BANDS=%d\n",
+          	       (int)sizeof(struct wiphy), (int)offsetof(struct wiphy, bands),
+          	       (int)offsetof(struct wiphy, reg_notifier), (int)offsetof(struct wiphy, regd),
+          	       (int)offsetof(struct wiphy, regulatory_flags), (int)IEEE80211_NUM_BANDS);
+
+          	regd = kzalloc(sizeof(*regd) + sizeof(struct ieee80211_reg_rule), GFP_KERNEL);
+          	ch = kcalloc(NSLOT, sizeof(*ch), GFP_KERNEL);
+          	sb = kcalloc(NSLOT, sizeof(*sb), GFP_KERNEL);
+          	fake = kzalloc(PAGE_SIZE, GFP_KERNEL);
+          	if (!regd || !ch || !sb || !fake) {
+          		printk(KERN_ERR "WPROBE: out of memory\n");
+          		goto out;
+          	}
+
+          	regd->n_reg_rules = 1;
+          	regd->alpha2[0] = '9';
+          	regd->alpha2[1] = '9';
+          	regd->reg_rules[0] = (struct ieee80211_reg_rule)
+          		REG_RULE(2402 - 10, 2494 + 10, 40, 6, 20, 0);
+
+          	for (i = 0; i < NSLOT; i++) {
+          		ch[i].band = IEEE80211_BAND_2GHZ;
+          		ch[i].center_freq = 2412;
+          		ch[i].hw_value = 1;
+          		ch[i].max_reg_power = -1;
+          		ch[i].max_power = -1;
+          		sb[i].channels = &ch[i];
+          		sb[i].n_channels = 1;
+          		sb[i].band = IEEE80211_BAND_2GHZ;
+          		*(struct ieee80211_supported_band **)(fake + SLOT_LO + 8 * i) = &sb[i];
+          	}
+
+          	/* expect one WARN about REGULATORY_CUSTOM_REG not being set; harmless */
+          	wiphy_apply_custom_regulatory((struct wiphy *)fake, regd);
+
+          	for (i = 0; i < NSLOT; i++) {
+          		if (ch[i].max_reg_power != -1 || ch[i].orig_flags) {
+          			printk(KERN_ERR "WPROBE: kernel read slot 0x%x as a band (max_reg_power=%d orig_flags=0x%x)\n",
+          			       SLOT_LO + 8 * i, ch[i].max_reg_power, ch[i].orig_flags);
+          			hits++;
+          		}
+          	}
+          	printk(KERN_ERR "WPROBE: %d slot(s) processed; kernel's wiphy->bands[0] = lowest of them\n", hits);
+
+          	for (i = 0; i < PAGE_SIZE; i += 4) {
+          		u32 v = *(u32 *)(fake + i);
+          		if (i >= SLOT_LO && i < SLOT_HI)
+          			continue;
+          		if (v)
+          			printk(KERN_ERR "WPROBE: kernel wrote 0x%x at fake wiphy offset 0x%x (regulatory_flags if it is 1)\n", v, i);
+          	}
+          out:
+          	kfree(fake);
+          	kfree(sb);
+          	kfree(ch);
+          	kfree(regd);
+          	return -EAGAIN;	/* probe only: do not stay loaded */
+          }
+
+          module_init(wprobe_init);
+          MODULE_LICENSE("GPL");
+          CSRC
+          sed -i 's/^          //' "$wp/wiphy_probe.c"
+          echo 'obj-m := wiphy_probe.o' > "$wp/Makefile"
+          make -C "$KERNEL_BUILD" M="$wp" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="$CC" HOSTCC=gcc-9 modules 2>&1 | tail -15
+          ls -l "$wp/wiphy_probe.ko"
+          "$STRIP" --strip-debug "$wp/wiphy_probe.ko"
+          modinfo "$wp/wiphy_probe.ko" | grep -E '^(vermagic|depends)'
+
       - name: Diagnostics - LG headers vs vanilla 4.4.84, and kernel objects to disassemble
         run: |
-          set -uo pipefail
+          set -u
           # Information only; never fails the job. The TV oops shows cfg80211 reading a
           # wiphy->bands[] slot that holds the driver's reg_notifier, so find out whether
           # LG's cfg80211.h/nl80211.h really equal vanilla 4.4.84, and whether the package
@@ -266,10 +369,10 @@ jobs:
               fi
             done
             echo "== built kernel objects in the LG package"
-            find "$RUNNER_TEMP/lg-unpacked" \( -name 'vmlinux*' -o -name System.map -o -name 'Image*' \
-              -o -name 'reg.o' -o -name 'cfg80211.o' -o -path '*net/wireless/built-in.o' \) \
-              -printf '%p (%s bytes)\n' | head -20
-            reg="$(find "$RUNNER_TEMP/lg-unpacked" -name reg.o -path '*net/wireless*' | head -1)"
+            find "$RUNNER_TEMP/lg-unpacked" -type f -not -path '*/arch/*' -not -path '*/scripts/*' \
+              \( -name vmlinux -o -name System.map -o -name 'Image' -o -name 'Image.gz' -o -name reg.o \
+                 -o -name cfg80211.o -o -name cfg80211.ko \) -printf '%p (%s bytes)\n'
+            reg="$(find "$RUNNER_TEMP/lg-unpacked" -type f -name reg.o -path '*net/wireless*' -print -quit)"
             if [ -n "$reg" ]; then
               for fn in wiphy_apply_custom_regulatory handle_channel_custom.isra.18 handle_channel_custom; do
                 echo "== disassembly: $fn"
@@ -277,8 +380,9 @@ jobs:
                   | awk -v f="<$fn>:" '$2==f {p=1} p {print} p && /^$/ {exit}' | head -80
               done
             fi
-          } 2>&1 | tee -a "$diag"
-          cp "$diag" "$RUNNER_TEMP/lg-diagnostics.keep" || true
+          } > "$diag" 2>&1
+          cat "$diag"
+          exit 0
 
       - name: Fetch rtl8812au (pinned commit)
         run: |
@@ -409,6 +513,7 @@ jobs:
           cp "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/missing.txt" out/
           cp "$KERNEL_BUILD/.config" out/lg-kernel.config
           cp "$RUNNER_TEMP/lg-diagnostics.txt" out/ || true
+          cp "$RUNNER_TEMP/wprobe/wiphy_probe.ko" out/ || true
           cp "$RUNNER_TEMP"/layout-lg.txt "$RUNNER_TEMP"/layout-tv.txt "$RUNNER_TEMP"/config-diff.txt out/ || true
           (cd out && sha256sum 88XXau.ko > 88XXau.ko.sha256 && cat 88XXau.ko.sha256)
 
