@@ -236,6 +236,50 @@ jobs:
           echo "(oops on the TV: the kernel's wiphy->bands[2] slot held reg_notifier, i.e."
           echo " kernel bands offset = module bands offset + 16 with the LG headers)"
 
+      - name: Diagnostics - LG headers vs vanilla 4.4.84, and kernel objects to disassemble
+        run: |
+          set -uo pipefail
+          # Information only; never fails the job. The TV oops shows cfg80211 reading a
+          # wiphy->bands[] slot that holds the driver's reg_notifier, so find out whether
+          # LG's cfg80211.h/nl80211.h really equal vanilla 4.4.84, and whether the package
+          # contains any built kernel objects (reg.o, vmlinux) that show the real layout.
+          diag="$RUNNER_TEMP/lg-diagnostics.txt"
+          : > "$diag"
+          {
+            LG="$(readlink -f "$KERNEL_BUILD/kernel-source" 2>/dev/null || true)"
+            echo "LG source dir: ${LG:-<none>}"
+            echo "== LINUX_VERSION_CODE in LG tree"
+            grep -rh 'LINUX_VERSION_CODE\|UTS_RELEASE' "$KERNEL_BUILD/include/generated/uapi/linux/version.h" \
+              "$KERNEL_BUILD/include/generated/utsrelease.h" 2>/dev/null
+            for h in include/net/cfg80211.h include/uapi/linux/nl80211.h include/linux/ieee80211.h; do
+              echo "== diff vanilla v4.4.84 vs LG: $h"
+              if curl -fsSL --retry 3 -o "$RUNNER_TEMP/vanilla.h" \
+                   "https://raw.githubusercontent.com/gregkh/linux/v4.4.84/$h"; then
+                if [ -n "$LG" ] && [ -f "$LG/$h" ]; then
+                  diff -u "$RUNNER_TEMP/vanilla.h" "$LG/$h" | head -120 && echo "(end of diff)"
+                  cmp -s "$RUNNER_TEMP/vanilla.h" "$LG/$h" && echo "IDENTICAL"
+                else
+                  echo "LG has no $h"
+                fi
+              else
+                echo "could not fetch vanilla $h"
+              fi
+            done
+            echo "== built kernel objects in the LG package"
+            find "$RUNNER_TEMP/lg-unpacked" \( -name 'vmlinux*' -o -name System.map -o -name 'Image*' \
+              -o -name 'reg.o' -o -name 'cfg80211.o' -o -path '*net/wireless/built-in.o' \) \
+              -printf '%p (%s bytes)\n' | head -20
+            reg="$(find "$RUNNER_TEMP/lg-unpacked" -name reg.o -path '*net/wireless*' | head -1)"
+            if [ -n "$reg" ]; then
+              for fn in wiphy_apply_custom_regulatory handle_channel_custom.isra.18 handle_channel_custom; do
+                echo "== disassembly: $fn"
+                aarch64-linux-gnu-objdump -d --no-show-raw-insn "$reg" \
+                  | awk -v f="<$fn>:" '$2==f {p=1} p {print} p && /^$/ {exit}' | head -80
+              done
+            fi
+          } 2>&1 | tee -a "$diag"
+          cp "$diag" "$RUNNER_TEMP/lg-diagnostics.keep" || true
+
       - name: Fetch rtl8812au (pinned commit)
         run: |
           set -euo pipefail
@@ -364,6 +408,7 @@ jobs:
           cp "$RUNNER_TEMP/driver-build.log" out/
           cp "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/missing.txt" out/
           cp "$KERNEL_BUILD/.config" out/lg-kernel.config
+          cp "$RUNNER_TEMP/lg-diagnostics.txt" out/ || true
           cp "$RUNNER_TEMP"/layout-lg.txt "$RUNNER_TEMP"/layout-tv.txt "$RUNNER_TEMP"/config-diff.txt out/ || true
           (cd out && sha256sum 88XXau.ko > 88XXau.ko.sha256 && cat 88XXau.ko.sha256)
 
