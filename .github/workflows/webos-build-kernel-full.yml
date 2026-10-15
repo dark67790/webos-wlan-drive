@@ -23,6 +23,10 @@ on:
         description: "KDRV_PLATFORM_CFG (a dir under kdriver/platform/, e.g. e60_webos_udtv or o20_webos_udtv)"
         type: string
         default: "o20_webos_udtv"
+      skip_kdriver:
+        description: "Drop LG's lg_kdriver SoC drivers from the build (they don't compile; not needed for headers/Module.symvers)"
+        type: boolean
+        default: true
       targets:
         description: "make targets"
         type: string
@@ -127,6 +131,10 @@ jobs:
           rm -rf "$kroot/drivers/lg_kdriver"
           ln -s "$KDRIVER_DIR" "$kroot/drivers/lg_kdriver"
           ls "$kroot/drivers/lg_kdriver/core/Makefile"
+          if [ "${{ inputs.skip_kdriver }}" = "true" ]; then
+            sed -i '/lg_kdriver/d' "$kroot/drivers/Makefile"
+            grep -n lg_kdriver "$kroot/drivers/Makefile" || echo "lg_kdriver removed from drivers/Makefile"
+          fi
           gcc="$(find "$RUNNER_TEMP/tc" \( -type f -o -type l \) -name '*-gcc' | grep -E 'aarch64|arm64' | head -1)"
           [ -n "$gcc" ] || { echo "::error::no aarch64 gcc found in toolchain"; exit 1; }
           cross="${gcc%gcc}"
@@ -197,3 +205,41 @@ jobs:
           name: lg-kernel
           path: out/
           if-no-files-found: error
+
+      - name: Collect build errors (runs even when the build fails)
+        if: ${{ always() && !inputs.map_only }}
+        run: |
+          set +e
+          log="$RUNNER_TEMP/kernel-build.log"
+          mkdir -p errors
+          [ -f "$log" ] || { echo "no build log (failed before make)"; exit 0; }
+          grep -E ' error: |fatal error|undefined reference|No rule to make target|\*\*\* ' "$log" > errors/all-errors.txt
+          grep -oE '^[^ ]+\.[chS]:[0-9]+:[0-9]+: error: .*' "$log" > errors/compile-errors.txt
+          grep -n -m1 -B8 -A12 -E ' error: |No rule to make target' "$log" > errors/first-error.txt
+          grep 'No rule to make target' "$log" | sort -u > errors/missing-targets.txt
+          grep -oE '\*\*\* \[[^]]*\]' "$log" | sort -u > errors/failed-targets.txt
+          sed -E 's/:[0-9]+:[0-9]+: error:.*//' errors/compile-errors.txt | sort | uniq -c | sort -rn > errors/by-file.txt
+          sed -E 's/:[0-9]+:[0-9]+: error:.*//; s|/[^/]*$||' errors/compile-errors.txt | sort | uniq -c | sort -rn > errors/by-dir.txt
+          sed -E 's/^[^:]+:[0-9]+:[0-9]+: error: //' errors/compile-errors.txt \
+            | sed -E "s/'[^']*'/'X'/g" | sort | uniq -c | sort -rn | head -40 > errors/by-message.txt
+          grep -c ' warning: ' "$log" > errors/warning-count.txt
+          tail -150 "$log" > errors/tail.txt
+          gzip -c "$log" > errors/kernel-build.log.gz
+          cp "$KROOT/.config" errors/dot-config 2>/dev/null
+          {
+            echo "### Kernel build errors"
+            echo "compile errors: $(wc -l < errors/compile-errors.txt), failed targets: $(wc -l < errors/failed-targets.txt), missing make rules: $(wc -l < errors/missing-targets.txt)"
+            echo; echo "#### Errors by directory"; echo '```'; head -15 errors/by-dir.txt; echo '```'
+            echo "#### Most common messages"; echo '```'; head -15 errors/by-message.txt; echo '```'
+            echo "#### Missing make rules"; echo '```'; head -10 errors/missing-targets.txt; echo '```'
+            echo "#### First error in context"; echo '```'; head -40 errors/first-error.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -l errors
+
+      - name: Upload build errors
+        if: ${{ always() && !inputs.map_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-errors
+          path: errors/
+          if-no-files-found: ignore
