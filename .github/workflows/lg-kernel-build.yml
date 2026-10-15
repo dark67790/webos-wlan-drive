@@ -158,18 +158,27 @@ jobs:
           sed -i 's/^          //' "$probe/probe.c"
           echo 'obj-m := probe.o' > "$probe/Makefile"
           cat > "$RUNNER_TEMP/probe.py" <<'PYCODE'
-          import re, sys
-          t = open(sys.argv[1]).read()
-          for m in re.finditer(r'^((?:wiphy|num|device|netdev|wdev|usb|sk_buff|cfg)_[a-z_0-9]+):\n\s*\.(?:word|long|4byte)\s+(\d+)', t, re.M):
-              print("  %-26s %5d  (0x%x)" % (m.group(1), int(m.group(2)), int(m.group(2))))
+          import re, subprocess, sys, tempfile, os
+          obj, prefix = sys.argv[1], sys.argv[2]
+          syms = subprocess.run([prefix + "nm", obj], capture_output=True, text=True, check=True).stdout
+          with tempfile.TemporaryDirectory() as d:
+              blob = os.path.join(d, "rodata.bin")
+              subprocess.run([prefix + "objcopy", "-O", "binary", "-j", ".rodata", obj, blob], check=True)
+              data = open(blob, "rb").read()
+          for line in syms.splitlines():
+              m = re.match(r'^([0-9a-f]+)\s+[Rr]\s+((?:wiphy|num|device|netdev|wdev|usb|sk_buff|cfg)_[a-z_0-9]+)$', line)
+              if m:
+                  off = int(m.group(1), 16)
+                  val = int.from_bytes(data[off:off + 4], "little")
+                  print("  %-26s %5d  (0x%x)" % (m.group(2), val, val))
           PYCODE
           sed -i 's/^          //' "$RUNNER_TEMP/probe.py"
           run_probe() {
-            rm -f "$probe/probe.s"
+            rm -f "$probe/probe.o" "$probe/probe.ko"
             make -C "$KERNEL_BUILD" M="$probe" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-              CC="$CC" HOSTCC=gcc-9 probe.s > "$probe/probe.log" 2>&1 \
+              CC="$CC" HOSTCC=gcc-9 modules > "$probe/probe.log" 2>&1 \
               || { echo "probe build failed:"; tail -15 "$probe/probe.log"; return 0; }
-            python3 -I "$RUNNER_TEMP/probe.py" "$probe/probe.s"
+            python3 -I "$RUNNER_TEMP/probe.py" "$probe/probe.o" aarch64-linux-gnu-
           }
 
           echo "== layout with LG's prepared headers (as shipped)"
