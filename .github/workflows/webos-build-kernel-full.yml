@@ -28,6 +28,7 @@ permissions:
   contents: read
 
 env:
+  TV_RELEASE: 4.4.84-229.kcl4tv.6   # what `uname -r` shows on the TV
   TOOLCHAIN_ID: 1Oe0g49VU2mARleb6utWjI95FHMIQqOku
   KERNEL_ID: 1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2
 
@@ -80,11 +81,19 @@ jobs:
           # outer -> soc/E_webOS_6.0.tgz -> GPL_2.0/kdriver.tgz -> kdriver/kernel/linux-4.4-lg115x.tgz
           tar -xOf "$RUNNER_TEMP/dl/webos-kernel.tar.gz" soc/E_webOS_6.0.tgz \
             | tar -xzOf - webOS6.0_SIC_E60_Opensource/GPL_2.0/kdriver.tgz \
-            | tar -xzOf - kdriver/kernel/linux-4.4-lg115x.tgz \
-            > "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz"
+            > "$RUNNER_TEMP/dl/kdriver.tgz"
           rm -f "$RUNNER_TEMP/dl/webos-kernel.tar.gz"
-          ls -l "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz"
-          bash scripts/lg-unpack-map.sh "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz" "$RUNNER_TEMP/src"
+          ls -l "$RUNNER_TEMP/dl/kdriver.tgz"
+          # kernel tgz + LG's kdriver tree (drivers/lg_kdriver) + LG's make settings
+          kd="$RUNNER_TEMP/kd"; mkdir -p "$kd"
+          tar -xzf "$RUNNER_TEMP/dl/kdriver.tgz" -C "$kd" \
+            kdriver/kdriver kdriver/kernel/linux-4.4-lg115x.tgz
+          tar -xzf "$RUNNER_TEMP/dl/kdriver.tgz" -C "$kd" --wildcards 'kdriver/*.inc' || true
+          rm -f "$RUNNER_TEMP/dl/kdriver.tgz"
+          echo "== LG's cmn_def.inc (KERNEL_DEFCONFIG, CROSS_COMPILE, ...)"
+          grep -vE '^\s*#|^\s*$' "$kd"/kdriver/*.inc || true
+          echo "KDRIVER_DIR=$kd/kdriver/kdriver" >> "$GITHUB_ENV"
+          bash scripts/lg-unpack-map.sh "$kd/kdriver/kernel/linux-4.4-lg115x.tgz" "$RUNNER_TEMP/src"
           df -h /
 
       - name: Upload the map
@@ -109,6 +118,10 @@ jobs:
             kroot="$(cat "$src/.kernel_roots")"
           fi
           [ -f "$kroot/Makefile" ] || { echo "::error::no Makefile in $kroot"; exit 1; }
+          # Same as LG's kernel/Makefile "config" target: drivers/lg_kdriver -> kdriver/kdriver
+          rm -rf "$kroot/drivers/lg_kdriver"
+          ln -s "$KDRIVER_DIR" "$kroot/drivers/lg_kdriver"
+          ls "$kroot/drivers/lg_kdriver/core/Makefile"
           gcc="$(find "$RUNNER_TEMP/tc" \( -type f -o -type l \) -name '*-gcc' | grep -E 'aarch64|arm64' | head -1)"
           [ -n "$gcc" ] || { echo "::error::no aarch64 gcc found in toolchain"; exit 1; }
           cross="${gcc%gcc}"
@@ -130,9 +143,13 @@ jobs:
           else
             cp "$GITHUB_WORKSPACE/tv-kernel.config" .config
           fi
+          # LG's suffix is not in the config; without it modules get a vermagic mismatch.
+          scripts/config --set-str LOCALVERSION "${TV_RELEASE#4.4.84}" --disable LOCALVERSION_AUTO
           $M olddefconfig
-          grep -E '^CONFIG_(PM|SMP|PREEMPT|MODULES|MODVERSIONS|CFG80211|USB)=' .config || true
-          $M kernelrelease
+          grep -E '^CONFIG_(PM|SMP|PREEMPT|MODULES|MODVERSIONS|CFG80211|USB|LOCALVERSION)' .config || true
+          rel="$($M -s kernelrelease 2>/dev/null | tail -1)"
+          echo "kernel release: $rel (TV: $TV_RELEASE)"
+          [ "$rel" = "$TV_RELEASE" ] || { echo "::error::release '$rel' != TV '$TV_RELEASE'"; exit 1; }
 
       - name: Build
         if: ${{ !inputs.map_only }}
@@ -143,6 +160,8 @@ jobs:
           echo "make exit: ${PIPESTATUS[0]}"
           grep -E ' error[: ]|\*\*\*' "$RUNNER_TEMP/kernel-build.log" | head -60 || true
           ls -l arch/${{ inputs.arch }}/boot/Image* vmlinux
+          ko="$(find . -name '*.ko' | head -1)"
+          [ -z "$ko" ] || echo "vermagic: $(modinfo -F vermagic "$ko")  (TV wants: $TV_RELEASE SMP preempt mod_unload aarch64)"
 
       - name: Collect output
         if: ${{ !inputs.map_only }}
