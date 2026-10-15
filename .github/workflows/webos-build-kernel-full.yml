@@ -58,7 +58,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex make git libelf-dev libssl-dev perl python3 \
-            python3-pip tar xz-utils unzip kmod file cpio rsync gcc-9 g++-9 lzop u-boot-tools device-tree-compiler
+            python3-pip tar xz-utils zstd unzip kmod file cpio rsync gcc-9 g++-9 lzop u-boot-tools device-tree-compiler
           python3 -m pip install --user gdown
 
       - name: Download toolchain + kernel source from Google Drive
@@ -192,19 +192,44 @@ jobs:
           cp "$RUNNER_TEMP/kernel-build.log"  "$GITHUB_WORKSPACE/out/"
           make ARCH=${{ inputs.arch }} CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
             INSTALL_MOD_PATH="$GITHUB_WORKSPACE/out/modules" INSTALL_MOD_STRIP=1 modules_install || true
+          # these symlinks point at the whole kernel tree and get followed by the uploader
+          rm -f "$GITHUB_WORKSPACE"/out/modules/lib/modules/*/build "$GITHUB_WORKSPACE"/out/modules/lib/modules/*/source
           # Tree for building out-of-tree modules later (no objects)
           cd "$(dirname "$KROOT")"
-          tar --exclude='*.o' --exclude='*.a' --exclude='.git' \
-            -cJf "$GITHUB_WORKSPACE/out/kernel-tree-for-modules.tar.xz" "$(basename "$KROOT")"
-          ls -lh "$GITHUB_WORKSPACE/out"
+          echo "packing tree..."; date
+          tar --exclude='*.o' --exclude='*.a' --exclude='*.ko' --exclude='vmlinux' --exclude='.git' \
+            -I 'zstd -T0 -3' -cf "$GITHUB_WORKSPACE/out/kernel-tree-for-modules.tar.zst" "$(basename "$KROOT")"
+          # vmlinux has DWARF (CONFIG_DEBUG_INFO=y): useful for pahole struct-layout diffs vs the TV
+          zstd -T0 -3 -q -o "$GITHUB_WORKSPACE/out/vmlinux.zst" "$KROOT/vmlinux" || true
+          date
+          echo "== what is in out/ (sizes)"; du -sh "$GITHUB_WORKSPACE"/out/* | sort -h
 
-      - name: Upload kernel output
+      - name: Upload core output (small)
         if: ${{ !inputs.map_only }}
         uses: actions/upload-artifact@v4
         with:
-          name: lg-kernel
-          path: out/
+          name: lg-kernel-core
+          path: |
+            out/kernel.config
+            out/System.map
+            out/Module.symvers
+            out/kernel.release
+            out/Image*
+            out/kernel-build.log
+            out/modules/
           if-no-files-found: error
+
+      - name: Upload kernel tree + vmlinux (big, already compressed)
+        if: ${{ !inputs.map_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lg-kernel-tree
+          path: |
+            out/kernel-tree-for-modules.tar.zst
+            out/vmlinux.zst
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: warn
 
       - name: Collect build errors (runs even when the build fails)
         if: ${{ always() && !inputs.map_only }}
