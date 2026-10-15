@@ -1,0 +1,172 @@
+name: Build LG kernel (webOS 6.0 source)
+
+on:
+  workflow_dispatch:
+    inputs:
+      map_only:
+        description: "Only download, unpack and print the map (no build)"
+        type: boolean
+        default: false
+      kernel_dir:
+        description: "Kernel root relative to the unpacked tree (blank = auto-detect)"
+        type: string
+        default: ""
+      defconfig:
+        description: "make <name> (blank = use tv-kernel.config from this repo)"
+        type: string
+        default: ""
+      arch:
+        description: "ARCH for make"
+        type: string
+        default: "arm64"
+      targets:
+        description: "make targets"
+        type: string
+        default: "Image modules"
+
+permissions:
+  contents: read
+
+env:
+  TOOLCHAIN_URL: https://drive.google.com/file/d/1Oe0g49VU2mARleb6utWjI95FHMIQqOku/view
+  KERNEL_URL: https://drive.google.com/file/d/1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2/view
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out repo (tv-kernel.config, scripts/)
+        uses: actions/checkout@v4
+
+      - name: Free disk space (nested tars need a lot)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex make git libelf-dev libssl-dev perl python3 \
+            python3-pip tar xz-utils unzip kmod file cpio rsync gcc-9 g++-9 lzop u-boot-tools device-tree-compiler
+          python3 -m pip install --user gdown
+
+      - name: Download toolchain + kernel source from Google Drive
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dl"
+          "$HOME/.local/bin/gdown" --fuzzy "$TOOLCHAIN_URL" -O "$RUNNER_TEMP/dl/toolchain.tar.gz"
+          "$HOME/.local/bin/gdown" --fuzzy "$KERNEL_URL"    -O "$RUNNER_TEMP/dl/webos-kernel.tar.gz"
+          ls -l "$RUNNER_TEMP/dl"
+          file "$RUNNER_TEMP/dl"/*
+
+      - name: Install LG SDK toolchain (self-extracting installer inside the tar)
+        run: |
+          set -euo pipefail
+          sdk=starfish-sdk-x86_64-aarch64-toolchain-5.0.0-20191125.sh
+          tar -xzf "$RUNNER_TEMP/dl/toolchain.tar.gz" -C "$RUNNER_TEMP/dl" \
+            "toolchain/$sdk" toolchain/README.txt toolchain/setup.sh
+          rm -f "$RUNNER_TEMP/dl/toolchain.tar.gz"
+          echo "== README.txt"; cat "$RUNNER_TEMP/dl/toolchain/README.txt"
+          chmod +x "$RUNNER_TEMP/dl/toolchain/$sdk"
+          "$RUNNER_TEMP/dl/toolchain/$sdk" -y -d "$RUNNER_TEMP/tc"
+          echo "== compilers found"
+          find "$RUNNER_TEMP/tc" \( -type f -o -type l \) -name '*-gcc' -printf '%p\n'
+          df -h /
+
+      - name: Stream the kernel out of the nested tars and print its map
+        run: |
+          set -euo pipefail
+          # outer -> soc/E_webOS_6.0.tgz -> GPL_2.0/kdriver.tgz -> kdriver/kernel/linux-4.4-lg115x.tgz
+          tar -xOf "$RUNNER_TEMP/dl/webos-kernel.tar.gz" soc/E_webOS_6.0.tgz \
+            | tar -xzOf - webOS6.0_SIC_E60_Opensource/GPL_2.0/kdriver.tgz \
+            | tar -xzOf - kdriver/kernel/linux-4.4-lg115x.tgz \
+            > "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz"
+          rm -f "$RUNNER_TEMP/dl/webos-kernel.tar.gz"
+          ls -l "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz"
+          bash scripts/lg-unpack-map.sh "$RUNNER_TEMP/dl/linux-4.4-lg115x.tgz" "$RUNNER_TEMP/src"
+          df -h /
+
+      - name: Upload the map
+        uses: actions/upload-artifact@v4
+        with:
+          name: lg-maps
+          path: ${{ runner.temp }}/src.map.txt
+
+      - name: Locate kernel root and cross compiler
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/src"
+          if [ -n "${{ inputs.kernel_dir }}" ]; then
+            kroot="$src/${{ inputs.kernel_dir }}"
+          else
+            n=$(wc -l < "$src/.kernel_roots")
+            if [ "$n" -ne 1 ]; then
+              echo "::error::Found $n kernel roots; rerun with the kernel_dir input. Candidates:"
+              cat "$src/.kernel_roots"; exit 1
+            fi
+            kroot="$(cat "$src/.kernel_roots")"
+          fi
+          [ -f "$kroot/Makefile" ] || { echo "::error::no Makefile in $kroot"; exit 1; }
+          gcc="$(find "$RUNNER_TEMP/tc" \( -type f -o -type l \) -name '*-gcc' | grep -E 'aarch64|arm64' | head -1)"
+          [ -n "$gcc" ] || { echo "::error::no aarch64 gcc found in toolchain"; exit 1; }
+          cross="${gcc%gcc}"
+          echo "KROOT=$kroot"       >> "$GITHUB_ENV"
+          echo "CROSS=$cross"       >> "$GITHUB_ENV"
+          echo "$(dirname "$gcc")"  >> "$GITHUB_PATH"
+          echo "kernel root: $kroot"; echo "cross prefix: $cross"
+          "${cross}gcc" --version | head -1
+
+      - name: Configure
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -euo pipefail
+          cd "$KROOT"
+          M="make ARCH=${{ inputs.arch }} CROSS_COMPILE=$CROSS HOSTCC=gcc-9"
+          $M mrproper            # drop whatever "prepared" leftovers LG shipped
+          if [ -n "${{ inputs.defconfig }}" ]; then
+            $M "${{ inputs.defconfig }}"
+          else
+            cp "$GITHUB_WORKSPACE/tv-kernel.config" .config
+          fi
+          $M olddefconfig
+          grep -E '^CONFIG_(PM|SMP|PREEMPT|MODULES|MODVERSIONS|CFG80211|USB)=' .config || true
+          $M kernelrelease
+
+      - name: Build
+        if: ${{ !inputs.map_only }}
+        run: |
+          cd "$KROOT"
+          make -k -j"$(nproc)" ARCH=${{ inputs.arch }} CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
+            KCFLAGS="-Wno-error" ${{ inputs.targets }} 2>&1 | tee "$RUNNER_TEMP/kernel-build.log"
+          echo "make exit: ${PIPESTATUS[0]}"
+          grep -E ' error[: ]|\*\*\*' "$RUNNER_TEMP/kernel-build.log" | head -60 || true
+          ls -l arch/${{ inputs.arch }}/boot/Image* vmlinux
+
+      - name: Collect output
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -euo pipefail
+          cd "$KROOT"
+          mkdir -p "$GITHUB_WORKSPACE/out/modules"
+          cp .config                          "$GITHUB_WORKSPACE/out/kernel.config"
+          cp System.map Module.symvers        "$GITHUB_WORKSPACE/out/" || true
+          cp include/config/kernel.release    "$GITHUB_WORKSPACE/out/" || true
+          cp arch/${{ inputs.arch }}/boot/Image* "$GITHUB_WORKSPACE/out/" || true
+          cp "$RUNNER_TEMP/kernel-build.log"  "$GITHUB_WORKSPACE/out/"
+          make ARCH=${{ inputs.arch }} CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
+            INSTALL_MOD_PATH="$GITHUB_WORKSPACE/out/modules" INSTALL_MOD_STRIP=1 modules_install || true
+          # Tree for building out-of-tree modules later (no objects)
+          cd "$(dirname "$KROOT")"
+          tar --exclude='*.o' --exclude='*.a' --exclude='.git' \
+            -cJf "$GITHUB_WORKSPACE/out/kernel-tree-for-modules.tar.xz" "$(basename "$KROOT")"
+          ls -lh "$GITHUB_WORKSPACE/out"
+
+      - name: Upload kernel output
+        if: ${{ !inputs.map_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lg-kernel
+          path: out/
+          if-no-files-found: error
