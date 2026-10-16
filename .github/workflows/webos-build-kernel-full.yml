@@ -23,6 +23,10 @@ on:
         description: "KDRV_PLATFORM_CFG (a dir under kdriver/platform/, e.g. e60_webos_udtv or o20_webos_udtv)"
         type: string
         default: "o20_webos_udtv"
+      patch_bands:
+        description: "Patch cfg80211.h to 4 bands for the driver build (only if the band probe says the tree has 3)"
+        type: boolean
+        default: false
       skip_kdriver:
         description: "Drop LG's lg_kdriver SoC drivers from the build (they don't compile; not needed for headers/Module.symvers)"
         type: boolean
@@ -38,6 +42,9 @@ permissions:
 env:
   # vermagic of the modules on the TV (tv-module-metadata.txt); uname -r has a suffix, vermagic does not
   TV_VERMAGIC: "4.4.84 SMP preempt mod_unload aarch64"
+  # Pinned tip of aircrack-ng/rtl8812au branch v5.6.4.2 (2026-03-17).
+  DRIVER_REPO: https://github.com/aircrack-ng/rtl8812au.git
+  DRIVER_SHA: 734485506a30d6237c2deaad666a19f8ca5379f2
   TOOLCHAIN_ID: 1Oe0g49VU2mARleb6utWjI95FHMIQqOku
   KERNEL_ID: 1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2
 
@@ -204,6 +211,155 @@ jobs:
           date
           echo "== what is in out/ (sizes)"; du -sh "$GITHUB_WORKSPACE"/out/* | sort -h
 
+      - name: Probe struct wiphy layout in this tree (patch to 4 bands only if needed)
+        if: ${{ !inputs.map_only }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # The TV's cfg80211 measured: NUM_BANDS=4, wiphy->bands at 0xe8, so reg_notifier at 0x108.
+          probe="$RUNNER_TEMP/probe"; mkdir -p "$probe"
+          cat > "$probe/probe.c" <<'CSRC'
+          #include <linux/module.h>
+          #include <linux/stddef.h>
+          #include <net/cfg80211.h>
+          #define X(n, v) const int n = (v)
+          X(num_bands, IEEE80211_NUM_BANDS);
+          X(wiphy_size, sizeof(struct wiphy));
+          X(wiphy_off_bands, offsetof(struct wiphy, bands));
+          X(wiphy_off_reg_notifier, offsetof(struct wiphy, reg_notifier));
+          X(wiphy_off_regd, offsetof(struct wiphy, regd));
+          MODULE_LICENSE("GPL");
+          CSRC
+          echo 'obj-m := probe.o' > "$probe/Makefile"
+          cat > "$RUNNER_TEMP/probe.py" <<'PYCODE'
+          import re, subprocess, sys, tempfile, os
+          obj, prefix = sys.argv[1], sys.argv[2]
+          syms = subprocess.run([prefix + "nm", obj], capture_output=True, text=True, check=True).stdout
+          with tempfile.TemporaryDirectory() as d:
+              blob = os.path.join(d, "rodata.bin")
+              subprocess.run([prefix + "objcopy", "-O", "binary", "-j", ".rodata", obj, blob], check=True)
+              data = open(blob, "rb").read()
+          for line in syms.splitlines():
+              m = re.match(r'^([0-9a-f]+)\s+[Rr]\s+((?:wiphy|num)_[a-z_0-9]+)$', line)
+              if m:
+                  off = int(m.group(1), 16)
+                  val = int.from_bytes(data[off:off + 4], "little")
+                  print("  %-26s %5d  (0x%x)" % (m.group(2), val, val))
+          PYCODE
+          run_probe() {
+            rm -f "$probe/probe.o" "$probe/probe.ko"
+            make -C "$KROOT" M="$probe" ARCH=arm64 CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 modules > "$probe/probe.log" 2>&1 \
+              || { echo "probe build failed:"; tail -20 "$probe/probe.log"; return 1; }
+            python3 -I "$RUNNER_TEMP/probe.py" "$probe/probe.o" "$CROSS"
+          }
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          echo "== layout in this tree (as built)"
+          run_probe | tee "$GITHUB_WORKSPACE/out/cfg80211-layout.txt"
+          echo "== TV measured: num_bands=4, wiphy_off_bands=232 (0xe8), wiphy_off_reg_notifier=264 (0x108)"
+          nb="$(awk '$1=="num_bands"{print $2}' "$GITHUB_WORKSPACE/out/cfg80211-layout.txt")"
+          if [ "$nb" = "3" ]; then
+            echo "tree has 3 bands, TV has 4: patching include/net/cfg80211.h"
+            python3 -I - "$KROOT/include/net/cfg80211.h" <<'PYCODE'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          t = p.read_text()
+          old = "\t/* keep last */\n\tIEEE80211_NUM_BANDS\n};"
+          new = "\tIEEE80211_BAND_LG_EXTRA = 3,\n\n\t/* keep last */\n\tIEEE80211_NUM_BANDS\n};"
+          if t.count(old) != 1:
+              raise SystemExit("band enum anchor: found %d" % t.count(old))
+          p.write_text(t.replace(old, new))
+          print("patched", p)
+          PYCODE
+            echo "== layout after patch"
+            run_probe | tee "$GITHUB_WORKSPACE/out/cfg80211-layout-patched.txt"
+          else
+            echo "tree already has $nb bands: no patch needed"
+          fi
+
+      - name: Build 88XXau.ko against this tree
+        if: ${{ !inputs.map_only }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/drv-src"; mkdir -p "$src"; cd "$src"
+          git init -q .
+          git remote add origin "$DRIVER_REPO"
+          git fetch -q --depth 1 origin "$DRIVER_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='driver commit %H (%cs) %s'
+
+          # cfg80211_connect_bss() only exists from 4.11; use cfg80211_connect_result() on 4.4
+          python3 -I - "$src" <<'PYCODE'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1]) / "os_dep/linux/ioctl_cfg80211.c"
+          text = path.read_text()
+
+          old_cond = ("#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) || "
+                      "defined(CONFIG_CFG80211_CONNECT_BSS_ANDROID))")
+          new_cond = old_cond.replace("(4, 10, 0)", "(4, 11, 0)")
+          if text.count(old_cond) != 1:
+              raise SystemExit(f"connect_bss condition: expected 1 match, found {text.count(old_cond)}")
+          text = text.replace(old_cond, new_cond)
+
+          legacy = re.compile(
+              r"(\t\t#else // \(LINUX_VERSION_CODE >= KERNEL_VERSION\(4, 10, 0\)\)\n"
+              r"\s*// Linux < 4\.10\.x does not accept the last argument \(timeout\)\.\n)"
+              r"(\s*)cfg80211_connect_bss\(wdev_to_ndev\(pwdev\), cur_network->network\.MacAddress, bss\n"
+              r"(.*?)"
+              r", WLAN_STATUS_SUCCESS, GFP_ATOMIC\);\n", re.S)
+
+          def repl(m):
+              ind, body = m.group(2), m.group(3)
+              return (m.group(1)
+                  + ind + "/* Linux < 4.11: no cfg80211_connect_bss(); use cfg80211_connect_result(). */\n"
+                  + ind + "cfg80211_connect_result(wdev_to_ndev(pwdev), cur_network->network.MacAddress\n"
+                  + body + ", WLAN_STATUS_SUCCESS, GFP_ATOMIC);\n"
+                  + ind + "if (bss)\n" + ind + "\tcfg80211_put_bss(pwdev->wiphy, bss);\n")
+
+          text, n = legacy.subn(repl, text)
+          if n != 1:
+              raise SystemExit(f"legacy connect_bss call: expected 1 match, found {n}")
+          path.write_text(text)
+          print("patched ioctl_cfg80211.c")
+          PYCODE
+          { grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$src" || true; } \
+            | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
+
+          set +e
+          make -k -j"$(nproc)" -C "$KROOT" M="$src" \
+            ARCH=arm64 CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
+            CONFIG_88XXAU=m CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y \
+            KSRC="$KROOT" modules 2>&1 | tee "$GITHUB_WORKSPACE/out/driver-build.log"
+          echo "make exit: ${PIPESTATUS[0]}"
+          set -e
+          echo "--- compile errors ---"
+          grep -E ' error[: ]|undefined reference|\*\*\*' "$GITHUB_WORKSPACE/out/driver-build.log" | head -40 || true
+          test -f "$src/88XXau.ko"
+
+          ko="$src/88XXau.ko"
+          cp "$ko" "$GITHUB_WORKSPACE/out/88XXau.debug.ko"
+          cp "$ko" "$GITHUB_WORKSPACE/out/88XXau.ko"
+          "${CROSS}strip" --strip-debug "$GITHUB_WORKSPACE/out/88XXau.ko"
+          vm="$(modinfo -F vermagic "$ko")"
+          echo "vermagic: $vm"
+          [ "$vm" = "$TV_VERMAGIC" ] && echo "vermagic matches the TV" || echo "::warning::vermagic '$vm' != TV '$TV_VERMAGIC'"
+
+          # Unknown symbols only show up at insmod (MODVERSIONS is off), so check here.
+          "${CROSS}nm" -u "$ko" | awk '{print $2}' | sort -u > "$RUNNER_TEMP/undef.txt"
+          awk '{print $2}' "$KROOT/Module.symvers" | sort -u > "$RUNNER_TEMP/exported.txt"
+          if [ -f tv-kallsyms.txt ]; then   # symbols that really exist on the TV (name = column 2)
+            awk '{print $2}' "$GITHUB_WORKSPACE/tv-kallsyms.txt" | sort -u >> "$RUNNER_TEMP/exported.txt"
+            sort -u -o "$RUNNER_TEMP/exported.txt" "$RUNNER_TEMP/exported.txt"
+          fi
+          comm -23 "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/exported.txt" > "$GITHUB_WORKSPACE/out/missing-symbols.txt"
+          echo "undefined symbols: $(wc -l < "$RUNNER_TEMP/undef.txt"), not found in exports: $(wc -l < "$GITHUB_WORKSPACE/out/missing-symbols.txt")"
+          cat "$GITHUB_WORKSPACE/out/missing-symbols.txt"
+          (cd "$GITHUB_WORKSPACE/out" && sha256sum 88XXau.ko | tee 88XXau.ko.sha256)
+
       - name: Upload core output (small)
         if: ${{ !inputs.map_only }}
         uses: actions/upload-artifact@v4
@@ -217,6 +373,10 @@ jobs:
             out/Image*
             out/kernel-build.log
             out/modules/
+            out/88XXau*
+            out/cfg80211-*
+            out/driver-build.log
+            out/missing-symbols.txt
           if-no-files-found: error
 
       - name: Upload kernel tree + vmlinux (big, already compressed)
@@ -230,6 +390,145 @@ jobs:
           compression-level: 0
           retention-days: 3
           if-no-files-found: warn
+
+      - name: Probe struct wiphy layout of this tree (compile only, nothing runs)
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -uo pipefail
+          p="$RUNNER_TEMP/wprobe"; mkdir -p "$p"
+          cat > "$p/probe.c" <<'CSRC'
+          #include <linux/kernel.h>
+          #include <linux/stddef.h>
+          #include <net/cfg80211.h>
+          #define D(n, v) asm volatile("\n->" #n " %0 " : : "i" (v))
+          void probe(void)
+          {
+          	D(WIPHY_BANDS, offsetof(struct wiphy, bands));
+          	D(WIPHY_REG_NOTIFIER, offsetof(struct wiphy, reg_notifier));
+          	D(NUM_BANDS, IEEE80211_NUM_BANDS);
+          	D(WIPHY_SIZE, sizeof(struct wiphy));
+          }
+          CSRC
+          sed -i 's/^          //' "$p/probe.c"
+          echo 'obj-m := probe.o' > "$p/Makefile"
+          make -C "$KROOT" M="$p" ARCH=${{ inputs.arch }} CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 probe.s > "$p/probe.log" 2>&1 \
+            || { tail -20 "$p/probe.log"; exit 1; }
+          sed -nE 's/^.*->([A-Z_]+) +#?([0-9]+).*$/\1 \2/p' "$p/probe.s" | tee "$p/vals.txt"
+          b=$(awk '$1=="WIPHY_BANDS"{print $2}' "$p/vals.txt")
+          r=$(awk '$1=="WIPHY_REG_NOTIFIER"{print $2}' "$p/vals.txt")
+          n=$(awk '$1=="NUM_BANDS"{print $2}' "$p/vals.txt")
+          printf 'bands offset=0x%x  reg_notifier offset=0x%x  NUM_BANDS=%s\n' "$b" "$r" "$n"
+          echo "TV (measured with wiphy_probe.ko): bands start 0xe8, kernel walks 4 slots, so reg_notifier should be 0x108"
+          if [ "$b" = 232 ] && [ "$r" = 264 ]; then
+            echo "layout matches the TV: no band patch needed"
+          else
+            echo "::warning::layout differs from the TV (bands=$b reg_notifier=$r NUM_BANDS=$n); rerun with patch_bands=true if bands is 232 but reg_notifier is 256"
+          fi
+
+      - name: Fetch rtl8812au (pinned commit) and patch for Linux 4.4
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/drv-src"; cd "$RUNNER_TEMP/drv-src"
+          git init -q .
+          git remote add origin https://github.com/aircrack-ng/rtl8812au.git
+          git fetch -q --depth 1 origin 734485506a30d6237c2deaad666a19f8ca5379f2
+          git checkout -q FETCH_HEAD
+          git log -1 --format='driver commit %H (%cs) %s'
+          echo "DRV=$RUNNER_TEMP/drv-src" >> "$GITHUB_ENV"
+          python3 -I - "$RUNNER_TEMP/drv-src" <<'PYCODE'
+          import re, sys
+          from pathlib import Path
+          path = Path(sys.argv[1]) / "os_dep/linux/ioctl_cfg80211.c"
+          text = path.read_text()
+          # cfg80211_connect_bss() only exists from 4.11; on 4.4 use cfg80211_connect_result()
+          old_cond = ("#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0) || "
+                      "defined(CONFIG_CFG80211_CONNECT_BSS_ANDROID))")
+          new_cond = old_cond.replace("(4, 10, 0)", "(4, 11, 0)")
+          if text.count(old_cond) != 1:
+              raise SystemExit("connect_bss condition: found %d" % text.count(old_cond))
+          text = text.replace(old_cond, new_cond)
+          legacy = re.compile(
+              r"(\t\t#else // \(LINUX_VERSION_CODE >= KERNEL_VERSION\(4, 10, 0\)\)\n"
+              r"\s*// Linux < 4\.10\.x does not accept the last argument \(timeout\)\.\n)"
+              r"(\s*)cfg80211_connect_bss\(wdev_to_ndev\(pwdev\), cur_network->network\.MacAddress, bss\n"
+              r"(.*?)"
+              r", WLAN_STATUS_SUCCESS, GFP_ATOMIC\);\n", re.S)
+          def repl(m):
+              ind, body = m.group(2), m.group(3)
+              return (m.group(1)
+                  + ind + "/* Linux < 4.11: no cfg80211_connect_bss(); use cfg80211_connect_result(). */\n"
+                  + ind + "cfg80211_connect_result(wdev_to_ndev(pwdev), cur_network->network.MacAddress\n"
+                  + body + ", WLAN_STATUS_SUCCESS, GFP_ATOMIC);\n"
+                  + ind + "if (bss)\n" + ind + "\tcfg80211_put_bss(pwdev->wiphy, bss);\n")
+          text, n = legacy.subn(repl, text)
+          if n != 1:
+              raise SystemExit("legacy connect_bss call: found %d" % n)
+          path.write_text(text)
+          print("patched ioctl_cfg80211.c")
+          PYCODE
+          { grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$RUNNER_TEMP/drv-src" || true; } \
+            | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
+
+      - name: Optional 4-band cfg80211.h patch (patch_bands input)
+        if: ${{ !inputs.map_only && inputs.patch_bands }}
+        run: |
+          set -euo pipefail
+          python3 -I - "$KROOT/include/net/cfg80211.h" <<'PYCODE'
+          import re, sys
+          from pathlib import Path
+          p = Path(sys.argv[1]); t = p.read_text()
+          old = "\t/* keep last */\n\tIEEE80211_NUM_BANDS\n};"
+          new = "\tIEEE80211_BAND_LG_EXTRA = 3,\n\n\t/* keep last */\n\tIEEE80211_NUM_BANDS\n};"
+          if t.count(old) != 1:
+              raise SystemExit("band enum anchor: found %d" % t.count(old))
+          p.write_text(t.replace(old, new)); print("patched", p)
+          PYCODE
+
+      - name: Build 88XXau.ko against the tree
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -uo pipefail
+          make -k -j"$(nproc)" -C "$KROOT" M="$DRV" ARCH=${{ inputs.arch }} CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
+            CONFIG_88XXAU=m CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y KSRC="$KROOT" \
+            modules 2>&1 | tee "$RUNNER_TEMP/driver-build.log"
+          echo "--- errors ---"
+          grep -E ' error[: ]|undefined reference|\*\*\*' "$RUNNER_TEMP/driver-build.log" | head -40 || true
+          test -f "$DRV/88XXau.ko"
+
+      - name: Check 88XXau.ko against the TV
+        if: ${{ !inputs.map_only }}
+        run: |
+          set -euo pipefail
+          ko="$DRV/88XXau.ko"
+          vm="$(modinfo -F vermagic "$ko")"; echo "vermagic: $vm"
+          [ "$vm" = "$TV_VERMAGIC" ] || { echo "::error::vermagic '$vm' != TV '$TV_VERMAGIC'"; exit 1; }
+          "${CROSS}nm" -u "$ko" | awk '{print $2}' | sort -u > "$RUNNER_TEMP/undef.txt"
+          awk '{print $2}' "$KROOT/Module.symvers" | sort -u > "$RUNNER_TEMP/exported.txt"
+          comm -23 "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/exported.txt" > "$RUNNER_TEMP/missing.txt"
+          echo "undefined: $(wc -l < "$RUNNER_TEMP/undef.txt"), not in this tree's Module.symvers: $(wc -l < "$RUNNER_TEMP/missing.txt")"
+          cat "$RUNNER_TEMP/missing.txt"
+          if [ -f tv-kallsyms.txt ]; then
+            awk '{print $2}' tv-kallsyms.txt | sort -u > "$RUNNER_TEMP/tv-syms.txt"
+            comm -23 "$RUNNER_TEMP/undef.txt" "$RUNNER_TEMP/tv-syms.txt" > "$RUNNER_TEMP/missing-on-tv.txt"
+            echo "NOT present in the TV's kallsyms (insmod would say Unknown symbol): $(wc -l < "$RUNNER_TEMP/missing-on-tv.txt")"
+            cat "$RUNNER_TEMP/missing-on-tv.txt"
+          fi
+          mkdir -p out88
+          cp "$ko" out88/88XXau.debug.ko; cp "$ko" out88/88XXau.ko
+          "${CROSS}strip" --strip-debug out88/88XXau.ko
+          cp "$RUNNER_TEMP"/driver-build.log "$RUNNER_TEMP"/undef.txt "$RUNNER_TEMP"/missing.txt out88/
+          (cd out88 && sha256sum 88XXau.ko | tee 88XXau.ko.sha256)
+
+      - name: Upload 88XXau module
+        if: ${{ always() && !inputs.map_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtl8812au-88XXau
+          path: |
+            out88/
+            ${{ runner.temp }}/driver-build.log
+          if-no-files-found: ignore
 
       - name: Collect build errors (runs even when the build fails)
         if: ${{ always() && !inputs.map_only }}
