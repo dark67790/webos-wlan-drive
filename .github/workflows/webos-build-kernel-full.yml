@@ -373,7 +373,11 @@ jobs:
           git checkout -q FETCH_HEAD
           git log -1 --format='driver2 commit %H (%cs) %s' | tee "$GITHUB_WORKSPACE/out/driver2-commit.txt"
           echo "== Makefile switches"
-          grep -n -E 'MODULE_NAME|^obj-|CONFIG_PLATFORM_(I386_PC|ARM64_RPI)|KVER|KSRC' Makefile | head -40 || true
+          grep -n -E '^obj-|export CONFIG_RTL|^CONFIG_RTL88|^CONFIG_USB_HCI|^ARCH|KERNELRELEASE' Makefile | head -30 || true
+          # The module is only built when its obj-$(CONFIG_xxx) switch is "m"; read the name from the Makefile
+          cfgvar="$( { grep -oE '^obj-\$\(CONFIG_[A-Za-z0-9_]+\)' Makefile || true; } | head -1 | sed -E 's/^obj-\$\((.*)\)/\1/')"
+          cfgvar="${cfgvar:-CONFIG_RTL8812AU}"
+          echo "module switch variable: $cfgvar"
           { grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$src" || true; } \
             | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
 
@@ -381,7 +385,7 @@ jobs:
           set +e
           make -k -j"$(nproc)" -C "$KROOT" M="$src" \
             ARCH=arm64 CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
-            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y KSRC="$KROOT" \
+            "$cfgvar=m" CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y KSRC="$KROOT" \
             modules 2>&1 | tee "$log"
           echo "make exit: ${PIPESTATUS[0]}"
           set -e
