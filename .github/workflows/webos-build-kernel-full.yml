@@ -41,6 +41,10 @@ env:
   # Pinned tip of aircrack-ng/rtl8812au branch v5.6.4.2 (2026-03-17).
   DRIVER_REPO: https://github.com/aircrack-ng/rtl8812au.git
   DRIVER_SHA: 734485506a30d6237c2deaad666a19f8ca5379f2
+  # morrownr/8812au-20210820 (v5.13.6-23, module 8812au.ko). Tracks main until a commit is pinned;
+  # the resolved commit is printed and saved as out/driver2-commit.txt.
+  DRIVER2_REPO: https://github.com/morrownr/8812au-20210820.git
+  DRIVER2_REF: main
   TOOLCHAIN_ID: 1Oe0g49VU2mARleb6utWjI95FHMIQqOku
   KERNEL_ID: 1i-7Ww5bLLqxItwrAUMl5d5ZfFnPGUqC2
 
@@ -356,6 +360,60 @@ jobs:
           cat "$GITHUB_WORKSPACE/out/missing-symbols.txt"
           (cd "$GITHUB_WORKSPACE/out" && sha256sum 88XXau.ko | tee 88XXau.ko.sha256)
 
+      - name: Build 8812au.ko (morrownr/8812au-20210820) against this tree
+        if: ${{ !inputs.map_only }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          src="$RUNNER_TEMP/drv2-src"; mkdir -p "$src"; cd "$src"
+          git init -q .
+          git remote add origin "$DRIVER2_REPO"
+          git fetch -q --depth 1 origin "$DRIVER2_REF"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='driver2 commit %H (%cs) %s' | tee "$GITHUB_WORKSPACE/out/driver2-commit.txt"
+          echo "== Makefile switches"
+          grep -n -E 'MODULE_NAME|^obj-|CONFIG_PLATFORM_(I386_PC|ARM64_RPI)|KVER|KSRC' Makefile | head -40 || true
+          { grep -rlE -e '-Werror' --include='Makefile*' --include='Kbuild' --include='*.mk' "$src" || true; } \
+            | xargs -r sed -i -E 's/-Werror(=[A-Za-z0-9_-]+)?//g'
+
+          log="$GITHUB_WORKSPACE/out/driver2-build.log"
+          set +e
+          make -k -j"$(nproc)" -C "$KROOT" M="$src" \
+            ARCH=arm64 CROSS_COMPILE="$CROSS" HOSTCC=gcc-9 \
+            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y KSRC="$KROOT" \
+            modules 2>&1 | tee "$log"
+          echo "make exit: ${PIPESTATUS[0]}"
+          set -e
+
+          # Error summary (also shown on the run page)
+          err="$GITHUB_WORKSPACE/out/driver2-errors.txt"
+          { grep -oE '^[^ ]+\.[chS]:[0-9]+:[0-9]+: error: .*' "$log" || true; } | sed "s|$src/||" > "$err"
+          {
+            echo "### 8812au (morrownr) build: $(wc -l < "$err") compile errors"
+            echo "Most common messages:"; echo '```'
+            sed -E 's/^[^:]+:[0-9]+:[0-9]+: error: //' "$err" | sed -E "s/'[^']*'/'X'/g" | sort | uniq -c | sort -rn | head -15
+            echo '```'; echo "First errors:"; echo '```'; head -20 "$err"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E ' error[: ]|undefined reference|No rule to make target' "$log" | head -40 || true
+
+          ko="$(find "$src" -name '8812au.ko' | head -1)"
+          [ -n "$ko" ] || { echo "::error::8812au.ko was not built"; exit 1; }
+          cp "$ko" "$GITHUB_WORKSPACE/out/8812au.debug.ko"
+          cp "$ko" "$GITHUB_WORKSPACE/out/8812au.ko"
+          "${CROSS}strip" --strip-debug "$GITHUB_WORKSPACE/out/8812au.ko"
+          vm="$(modinfo -F vermagic "$ko")"
+          echo "vermagic: $vm"
+          [ "$vm" = "$TV_VERMAGIC" ] && echo "vermagic matches the TV" || echo "::warning::vermagic '$vm' != TV '$TV_VERMAGIC'"
+
+          "${CROSS}nm" -u "$ko" | awk '{print $2}' | sort -u > "$RUNNER_TEMP/undef2.txt"
+          awk '{print $2}' "$KROOT/Module.symvers" | sort -u > "$RUNNER_TEMP/exported2.txt"
+          comm -23 "$RUNNER_TEMP/undef2.txt" "$RUNNER_TEMP/exported2.txt" > "$GITHUB_WORKSPACE/out/missing-symbols-8812au.txt"
+          echo "undefined symbols: $(wc -l < "$RUNNER_TEMP/undef2.txt"), not in this build's exports: $(wc -l < "$GITHUB_WORKSPACE/out/missing-symbols-8812au.txt")"
+          cat "$GITHUB_WORKSPACE/out/missing-symbols-8812au.txt"
+          cp "$RUNNER_TEMP/undef2.txt" "$GITHUB_WORKSPACE/out/undefined-symbols-8812au.txt"
+          (cd "$GITHUB_WORKSPACE/out" && sha256sum 8812au.ko | tee 8812au.ko.sha256)
+
       - name: Upload core output (small)
         if: ${{ !inputs.map_only }}
         uses: actions/upload-artifact@v4
@@ -370,6 +428,10 @@ jobs:
             out/kernel-build.log
             out/modules/
             out/88XXau*
+            out/8812au*
+            out/driver2-*
+            out/missing-symbols-8812au.txt
+            out/undefined-symbols-8812au.txt
             out/cfg80211-*
             out/driver-build.log
             out/missing-symbols.txt
